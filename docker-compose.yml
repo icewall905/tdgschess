@@ -1,0 +1,20 @@
+services:
+  chess-arena:
+    build: .
+    container_name: chess-arena
+    restart: unless-stopped
+    ports:
+      - "8765:8000"
+    environment:
+      # OpenAI-compatible endpoints, "name=url" comma separated.
+      - ENDPOINTS=${ENDPOINTS}
+      - LLM_API_KEY=${LLM_API_KEY:-none}
+      # UCI-over-TCP lc0 from ../lc0/chess-engine (socat on port 4001). Leave empty to hide Lc0.
+      - LC0_UCI_TCP=${LC0_UCI_TCP:-}
+      - MAX_PLIES=${MAX_PLIES:-400}
+    volumes:
+      - ./data:/data
+    deploy:
+      resources:
+        limits:
+          memory: 1G

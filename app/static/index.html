@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chess Arena</title>
+<link rel="icon" href="/static/pieces/wN.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&display=swap">
+<link rel="stylesheet" href="/static/style.css">
+<script>try { const t = localStorage.getItem("theme"); if (t) document.documentElement.dataset.theme = JSON.parse(t); } catch {}</script>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo"><img src="/static/pieces/wN.svg" alt=""></span> Chess Arena</div>
+  <nav class="seg">
+    <button data-view="play" class="active">♟ Play</button>
+    <button data-view="games">📜 Games</button>
+    <button data-view="standings">🏆 Standings</button>
+  </nav>
+  <button class="icon-btn" id="theme" title="Light / dark">🌙</button>
+</header>
+
+<main>
+  <!-- PLAY VIEW -->
+  <section id="view-play" class="view active">
+    <aside class="card setup" id="setup">
+      <div class="card-head">
+        <h2>New game</h2>
+        <button class="icon-btn small" id="collapse-setup" title="Hide setup">⟨</button>
+      </div>
+      <div class="presets">
+        <button data-preset="me-llm">🧒 Me vs 🤖</button>
+        <button data-preset="llm-llm">🤖 vs 🤖</button>
+        <button data-preset="llm-sf">🤖 vs 🐟</button>
+        <button data-preset="me-sf">🧒 Me vs 🐟</button>
+      </div>
+      <div class="side-config" data-side="white"></div>
+      <button class="swap" id="swap-sides" title="Swap sides">⇅ swap sides</button>
+      <div class="side-config" data-side="black"></div>
+      <details class="opts">
+        <summary>Match options</summary>
+        <div class="grid2">
+          <label>Games <input type="number" id="opt-games" min="1" max="100" value="1"></label>
+          <label>Min s / move <input type="number" id="opt-delay" step="0.1" min="0" value="0.6"></label>
+        </div>
+        <label class="chk"><input type="checkbox" id="opt-swap" checked> Alternate colours each game</label>
+        <label class="chk"><input type="checkbox" id="opt-analysis" checked> Stockfish eval bar</label>
+        <label>Start FEN (optional) <input type="text" id="opt-fen" placeholder="startpos"></label>
+      </details>
+      <button class="primary" id="start">▶ Start game</button>
+      <div class="err" id="setup-err"></div>
+      <div class="endpoints" id="endpoints"></div>
+    </aside>
+    <button class="card setup-tab" id="expand-setup" title="New game" hidden>＋<span>New game</span></button>
+
+    <div class="stage">
+      <div class="player-bar top" id="bar-top"></div>
+      <div class="board-wrap">
+        <div class="evalbar" id="evalbar"><div class="fill" id="evalfill"></div><span id="evaltext"></span></div>
+        <div class="board" id="board"></div>
+      </div>
+      <div class="player-bar bottom" id="bar-bottom"></div>
+      <div class="controls">
+        <div class="btn-group">
+          <button id="nav-first" title="First (Home)">⏮</button>
+          <button id="nav-prev" title="Back (←)">◀</button>
+          <button id="nav-next" title="Forward (→)">▶</button>
+          <button id="nav-last" title="Live (End)">⏭</button>
+        </div>
+        <button id="flip" title="Flip board (f)">🔄</button>
+        <label class="toggle" title="Show Stockfish's best move"><input type="checkbox" id="show-best"><span>💡 hint</span></label>
+        <label class="toggle"><input type="checkbox" id="sound"><span>🔊 sound</span></label>
+        <span class="grow"></span>
+        <button id="resign" class="danger" hidden>🏳 Resign</button>
+        <button id="abort" class="danger" hidden>⏹ Abort</button>
+        <button id="pgn">PGN</button>
+      </div>
+      <svg class="evalgraph" id="evalgraph" viewBox="0 0 400 60" preserveAspectRatio="none"></svg>
+    </div>
+
+    <aside class="card info">
+      <div class="status" id="status">No game selected. Configure players and press Start.</div>
+      <div class="moves" id="moves"></div>
+      <div class="tabs">
+        <div class="seg">
+          <button data-tab="chat" class="active">💬 Chat</button>
+          <button data-tab="log">🧠 Model log</button>
+        </div>
+        <span class="grow"></span>
+        <label class="toggle" data-for="chat"><input type="checkbox" id="speak"><span>🗣 read aloud</span></label>
+        <label class="toggle" data-for="log" hidden><input type="checkbox" id="show-reasoning"><span>reasoning</span></label>
+      </div>
+      <div class="chat" id="chat"></div>
+      <div class="log" id="log" hidden></div>
+    </aside>
+  </section>
+
+  <!-- GAMES VIEW -->
+  <section id="view-games" class="view">
+    <div class="card wide">
+      <h2>Games</h2>
+      <div class="tbl-wrap"><table class="tbl" id="games-table"></table></div>
+    </div>
+  </section>
+
+  <!-- STANDINGS VIEW -->
+  <section id="view-standings" class="view">
+    <div class="card wide">
+      <h2>Standings</h2>
+      <p class="muted">Aggregated over all finished games. Illegal = rejected LLM move attempts, Random = moves forced after running out of retries.</p>
+      <div class="tbl-wrap"><table class="tbl" id="standings-table"></table></div>
+    </div>
+  </section>
+</main>
+
+<div class="modal" id="promo" hidden><div class="promo-box" id="promo-box"></div></div>
+<div class="modal" id="pgn-modal" hidden>
+  <div class="pgn-box"><h2>PGN</h2><textarea id="pgn-text" readonly></textarea>
+    <div class="row"><button id="pgn-copy">📋 Copy</button> <a id="pgn-dl" download="game.pgn"><button>⬇ Download</button></a> <span class="grow"></span><button id="pgn-close">Close</button></div>
+  </div>
+</div>
+<script src="/static/app.js"></script>
+</body>
+</html>

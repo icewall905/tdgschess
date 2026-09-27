@@ -1,0 +1,14 @@
+# secrets / local settings
+.env
+.env.*
+!.env.example
+*.local
+docker-compose.override.yml
+
+# saved games (contain full model logs)
+data/
+
+# python
+__pycache__/
+*.pyc
+.venv/
