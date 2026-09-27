@@ -12,14 +12,14 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   - **position facts** (default on): piece list per side, material, attacked pieces flagged
     UNDEFENDED / attacked by cheaper piece, available checks/captures, mate-in-one and opponent mate threats,
     repetition / 50-move counters. Computed by python-chess, so small models stop hallucinating pieces.
-  - **legal moves grouped by piece** (default on). Research is mixed: helps small models avoid illegal
+  - **legal moves grouped by piece** (default off since Stockfish hints are on; on when hints are off). Research is mixed: helps small models avoid illegal
     moves (LLM Chess benchmark: −10–30% without), can hurt strong ones (dynomight). Try both.
   - **board image** (default off): 512px PNG (cairosvg), White at bottom, last move highlighted, sent as
     an OpenAI `image_url` part. Only for vision models; studies find images add little over text.
   - **chat** (default on): model adds a `SAY: …` line before `MOVE:` — short, kid-friendly reaction,
     optional character ("a friendly pirate"). Shown in the 💬 Chat tab next to Model log, with
     optional read-aloud (browser speech). Chat text is ignored when parsing the move.
-  - **Stockfish hints** (default off): Stockfish's top 3 moves (0.5 s MultiPV, eval in words + a 4-ply line)
+  - **Stockfish hints** (default on): Stockfish's top 3 moves (0.5 s MultiPV, eval in words + a 4-ply line)
     plus a game overview (phase, last 6 moves in words). Turning it on switches the legal-move list off.
     Engine-assisted games are rated under a separate key (`… · SF hints`).
   Request errors (e.g. 502) back off and retry up to 6× without using an illegal-move retry.

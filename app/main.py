@@ -174,9 +174,9 @@ class PlayerSpec(BaseModel):
     model: Optional[str] = None
     temperature: float = 0.6
     max_tokens: int = 8192
-    show_legal: bool = True
+    show_legal: bool = False  # the Stockfish hints below are a clearer shortlist; turn on when hints are off
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
-    engine_hints: bool = False  # Stockfish's top 3 moves (0.5 s) + a game overview; rated separately as assisted
+    engine_hints: bool = True  # Stockfish's top 3 moves (0.5 s) + a game overview; rated separately as assisted
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
     persona: str = ""  # optional character for the chat messages, e.g. "a friendly pirate"

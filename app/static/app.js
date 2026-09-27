@@ -55,11 +55,14 @@ let skipAnim = false;     // human dropped the piece by drag, it is already on t
 // ------------------------------------------------------------ setup form
 const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
-  llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, engine_hints: false, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
+  llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: false, hints: true, engine_hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
   stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
-for (const side of ["white", "black"]) if (!DEFAULTS[setup[side]?.type]) setup[side] = { ...DEFAULTS.stockfish };  // Lc0 was removed
+for (const side of ["white", "black"]) {
+  if (!DEFAULTS[setup[side]?.type]) setup[side] = { ...DEFAULTS.stockfish };  // Lc0 was removed
+  if (setup[side].type === "llm" && setup[side].engine_hints === undefined) Object.assign(setup[side], { engine_hints: true, show_legal: false });  // hints became the default
+}
 
 function firstModel(idx = 0) {
   const online = config.endpoints.filter((e) => e.online && e.models?.length);
