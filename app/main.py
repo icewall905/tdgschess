@@ -627,19 +627,23 @@ def try_parse(board: chess.Board, token: str):
         return None, f"'{tok}' is not valid SAN or UCI notation"
 
 
+VOICE = """Sound like a real, lively chess opponent sitting across the board - not a cheerleader. React like a \
+person would: surprise ("Hey, sneaky!"), worry ("Uh-oh, my rook is in trouble"), cheeky confidence ("My knight is \
+coming for you!"), jokes, bragging about a plan, and admitting your own mistakes ("Oops, I just gave away my \
+bishop!"). Only praise the other player's move when the facts say it was good or the best - never call a move \
+strong just to be nice. Mention the opening only when the facts say a new opening was reached. Follow the ANGLE \
+given with the facts. Don't start with "Wow" or "That was a super strong move", and don't repeat your recent \
+lines. 1-2 short sentences, at most two emojis, in character, kid-friendly (never mean, scary or rude)."""
+
+
 CHAT_PROMPT = """
 
 You are also chatting with the audience, who are children watching the game. Just before the MOVE line, write one
 line in exactly this format:
 SAY: <your message>
-The message is 1-2 short sentences (at most 25 words) that react to the opponent's last move and/or announce your
-own move in a cute, funny, kind way that fits the position (proud of a capture, "oops!" after losing a piece,
-excited about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and
-kid-friendly: never mean, scary or rude. Speak in character{persona}. {lang}
-Make it chess-smart: build the message on one real idea from the "Chat facts" (the opening's name, what your move
-does or plans, a threat, whether the opponent's move was strong or a mistake) - while staying in character.
-Vary your messages: start each one differently (not "Wow", "Hello" or the same exclamation every time) and
-don't repeat what you said in your recent messages."""
+The message (at most 25 words) reacts to the game and/or your move, built on one real idea from the "Chat facts".
+Speak in character{persona}. {lang}
+""" + VOICE
 
 
 def parse_say(text: str) -> str:
@@ -719,12 +723,6 @@ class LLMPlayer:
         if self.spec.chat and getattr(self, "unread", None):
             parts.append("The players wrote in the chat since your last move - answer them (kindly, briefly) in your "
                          "SAY line:\n" + "\n".join(f"- {m}" for m in self.unread))
-        if self.spec.chat:
-            mine = [e["say"] for e in self.game.log if e.get("side") == ("white" if self.color else "black")
-                    and e.get("say") and e.get("kind") != "chat"][-3:]
-            if mine:
-                parts.append("Your recent chat messages (say something new, and start it differently):\n"
-                             + "\n".join(f"- {m}" for m in mine))
         if rejected:
             parts.append("Your previous attempt(s) were rejected:\n" + "\n".join(f"- {r}" for r in rejected)
                          + "\nChoose a different, legal move" + (" from the list above." if self.spec.show_legal else "."))
@@ -748,7 +746,8 @@ class LLMPlayer:
         attempt, net_fails = 0, 0
         advice = None if self.spec.pure else await ADVISOR.top_moves(board)
         self.unread = unread_chat(self.game, "white" if self.color else "black") if self.spec.chat else []
-        self.chat_facts = await chat_context(board, self.color) if self.spec.chat else []
+        self.chat_facts = (await chat_insight(self.game, "white" if self.color else "black", board)
+                           if self.spec.chat else [])
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             while attempt <= self.spec.retries:
                 messages = self.build_prompt(board, rejected, advice)
@@ -887,6 +886,82 @@ async def chat_context(board: chess.Board, color: bool) -> list[str]:
     return facts
 
 
+async def chat_insight(game, side: str, board: chess.Board, own: Optional[chess.Move] = None,
+                       optional: bool = False) -> Optional[list[str]]:
+    """Facts for a chat line plus one ANGLE picked from what actually happened, so messages vary like a real
+    opponent's: admit an own blunder, pounce on theirs, react to captures, tease threats, brag about a plan...
+    `board` is the position before `side`'s move `own` (None: the move isn't known yet, e.g. an LLM player)."""
+    color = side == "white"
+    facts, angles = [], []  # (weight, angle)
+    after = board.copy()
+    if own:
+        after.push(own)
+    opening = opening_of(after)
+    if opening and game.said_opening.get(side) != opening:
+        facts.append(f"New opening reached: {opening}")
+        angles.append((2, f"mention that we are now in the {opening.split(' (')[0]}"))
+        game.said_opening[side] = opening
+    if board.move_stack:
+        prev = board.copy()
+        last = prev.pop()
+        try:
+            r = await coach.review(prev, last, prev.turn)
+            took = prev.piece_at(last.to_square)
+            facts.append(f"The other player's last move: {r['words']} - engine verdict: {r['cls']}")
+            if r["cls"] in ("blunder", "mistake"):
+                how = f" ({r['reply']['words']})" if r["reply"] else ""
+                facts.append(f"It lets you punish it{how}" + (f"; {r['motifs'][0]}" if r["motifs"] else ""))
+                angles.append((5, "pounce on their mistake - cheeky and excited, but kind"))
+            elif took:
+                angles.append((4, f"react to losing your {PIECE_NAMES[took.piece_type]} - dramatic, funny"))
+            elif r["cls"] == "best":
+                angles.append((2, "give an honest, impressed compliment for their move"))
+        except Exception:
+            pass
+    if own:
+        try:
+            mine = await coach.review(board, own, color)
+            facts.append(f"Your move: {mine['words']} - engine verdict: {mine['cls']}")
+            if mine["cls"] in ("blunder", "mistake"):
+                if mine["motifs"]:
+                    facts.append(f"Your move's problem: {mine['motifs'][0]}")
+                angles.append((6, "admit your own mistake in a funny way (\"oops...\") - you are only human"))
+            elif board.is_capture(own):
+                angles.append((4, "brag a little about the piece you just captured"))
+            if after.is_check():
+                angles.append((4, "tease that you are giving check"))
+        except Exception:
+            pass
+    try:
+        a = await coach.analyse(after, color)
+        facts.append(f"Score for you: {a['eval']}")
+        if a["threat"]:
+            facts.append(f"The other player threatens {a['threat']['words']}")
+            angles.append((3, "sound a bit worried about their threat"))
+        if a["targets"]:
+            t = a["targets"][0]
+            facts.append(f"You are attacking their {t['piece']} on {t['square']}")
+            angles.append((3, f"tease that you are after their {t['piece']}"))
+        if (a["cp"] or 0) > 300:
+            angles.append((2, "cheeky confidence - you are ahead"))
+        elif (a["cp"] or 0) < -300:
+            angles.append((2, "determined to make a comeback - you are behind"))
+        plan = a["top"][0]["line"] if a["top"] else a.get("opponent_plan")
+        if plan:
+            facts.append(f"Stockfish's expected line: {' '.join(plan)}")
+    except Exception:
+        pass
+    angles += [(1, "tell them about your plan for your pieces"), (1, "friendly banter about how the game is going")]
+    weight, angle = random.choices(angles, [w * w for w, _ in angles])[0]
+    if optional and weight <= 2 and random.random() < 0.5:
+        return None  # nothing notable happened: a real opponent doesn't talk after every move either
+    recent = [e["say"] for e in game.log if e.get("side") == side and e.get("say") and e.get("kind") != "ask"][-3:]
+    if recent:
+        facts.append("Your recent lines (say something different): " + " | ".join(recent))
+    facts.append(f"ANGLE for this message: {angle}")
+    return facts
+
+
 def unread_chat(game, side: str) -> list[str]:
     """Players' chat messages the LLM on `side` hasn't answered yet (it answers once, with its next move)."""
     seen = game.chat_seen.get(side, 0)
@@ -985,17 +1060,16 @@ def schedule_chat_replies(game):
 def chat_lang_line(game) -> str:
     """The game's language for chat lines (the MOVE line stays in chess notation)."""
     if getattr(game, "opts", None) and game.opts.lang == "da":
-        return "Write the chat message in Danish (dansk). Any MOVE line stays in standard English chess notation."
+        return ("Write the chat message in Danish (dansk), with the right Danish chess words: bonde (pawn), springer "
+                "(knight), løber (bishop), tårn (rook), dronning (queen), konge (king), skak (check), skakmat "
+                "(checkmate), rokade (castling). Any MOVE line stays in standard English chess notation.")
     return "Write the chat message in English."
 
 
-COMMENT_PROMPT = """You are {persona}. You are the chess engine {engine}, playing {color} against {opp} in a game \
-watched by children. You just made a move. Write ONE short chat message (1-2 sentences, at most 25 words) that \
-reacts to what just happened in a cute, funny, kind way (proud of a capture, "oops" after losing a piece, excited \
-about a check, a friendly compliment for a good opponent move). Use one real idea from the "Chat facts" (the \
-opening's name, a threat, whether the opponent's move was strong or a mistake) so you sound like a chess expert, \
-while staying in character. Emojis are welcome. Be sporting and kid-friendly: \
-never mean, scary or rude. Reply with only the message. {lang}"""
+COMMENT_PROMPT = """You are {persona}, playing {color} against {opp} in a game children are playing and watching. \
+You just made your move. Write ONE chat message (at most 25 words) built on one real idea from the "Chat facts". \
+Reply with only the message. {lang}
+""" + VOICE
 
 COMMENT_TASKS: set = set()  # keep references so fire-and-forget tasks aren't garbage collected
 
@@ -1033,13 +1107,6 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
     mat_after = {c: sum(PIECE_VALUES[p.piece_type] for p in after.piece_map().values() if p.color == c) for c in (True, False)}
     diff = mat_after[color] - mat_after[not color]
     facts.append("Material is even." if diff == 0 else f"You are {abs(diff)} points of material {'ahead' if diff > 0 else 'behind'}.")
-    ev = game.evals[-1] if game.evals else None
-    if ev:
-        cp = ev["cp"] if ev["cp"] is not None else (10000 if (ev["mate"] or 0) > 0 else -10000)
-        cp = cp if color else -cp
-        mood = ("you are winning big" if cp > 500 else "you are a bit better" if cp > 100 else
-                "the game is about even" if cp > -100 else "you are a bit worse" if cp > -500 else "you are losing")
-        facts.append(f"Your feeling about the position: {mood}.")
     if after.is_checkmate():
         facts.append("This move wins the game!")
     opp = game.spec_for(not color).label()
@@ -1060,19 +1127,16 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
         await asyncio.sleep(QUIET_BEFORE_LLM)
         if len(game.board.move_stack) > ply + 1 or game.status != "running":
             return  # the players already moved on; a later comment covers the newer position
-        opening = opening_of(after)
+        task.talking = True  # from here on a newer move doesn't cancel it: the comment is being written
+        book = OPENINGS.get(after.epd())  # exactly on a known opening line (not just "somewhere after one")
         notable = board.is_capture(mv) or after.is_check() or after.is_checkmate()
-        if opening and not notable and game.comment_opening.get(side) == opening:
-            return
-        game.comment_opening[side] = opening
+        if book and not notable and game.comment_opening.get(side) == book[1].split(":")[0]:
+            return  # still following well-known theory of the same opening: nothing worth saying
+        game.comment_opening[side] = book[1].split(":")[0] if book else None
         # expert context from Stockfish (opening, verdict on the opponent's move, threats, what comes next)
-        extra = [f for f in await chat_context(board, color) if not f.startswith(("Stockfish's plan", "The position for you"))]
-        try:
-            nxt = await coach.ENGINE.top(after, 1)
-            if nxt:
-                extra.append(f"Stockfish expects the game to continue: {' '.join(nxt[0]['line'])}")
-        except Exception:
-            pass
+        extra = await chat_insight(game, side, board, mv, optional=True)
+        if extra is None:
+            return
         if extra:
             body["messages"][1]["content"] += "\nChat facts (from Stockfish):\n" + "\n".join(f"- {f}" for f in extra)
         try:
@@ -1085,11 +1149,12 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
             return
         text = THINK_RE.sub("", text).strip()
         text = re.sub(r"^\s*SAY\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
-        if text:
+        recent = [e["say"] for e in game.log if e.get("side") == side and e.get("say")][-3:]
+        if text and text not in recent:  # two comments written at once can come out identical
             game.add_log({"ply": ply, "side": side, "move": board.san(mv), "say": text[:300], "kind": "comment"})
 
     old = game.comment_tasks.get(side)
-    if old and not old.done():
+    if old and not old.done() and not getattr(old, "talking", False):
         old.cancel()  # a newer move replaces a comment that is still waiting for a pause
     task = asyncio.create_task(run())
     game.comment_tasks[side] = task
@@ -1217,7 +1282,8 @@ class Game:
         self.chat_seen: dict[str, int] = {}
         self.reply_tasks: dict[str, asyncio.Task] = {}
         self.comment_tasks: dict[str, asyncio.Task] = {}
-        self.comment_opening: dict[str, Optional[str]] = {}  # side -> log length when its LLM last read the players' chat
+        self.comment_opening: dict[str, Optional[str]] = {}
+        self.said_opening: dict[str, Optional[str]] = {}  # last opening name each side's chat mentioned  # side -> log length when its LLM last read the players' chat
         self.review_decisions: asyncio.Queue = asyncio.Queue()
 
     def touch(self):

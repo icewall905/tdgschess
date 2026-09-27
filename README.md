@@ -96,6 +96,13 @@ is made, so 12 book moves in 12 s cost nothing and one comment arrives once the 
 line the commentator only talks on a capture, check or a new opening name. LLM players still write their chat
 line in the same call that picks their move; chat replies batch bursts of messages.
 
+Chat voice: LLM chat lines and engine comments sound like a real opponent, not a cheerleader. Each message gets
+one ANGLE picked (weighted) from what Stockfish says actually happened — admit an own blunder, pounce on the
+other player's mistake, react to a capture, tease a check or an attacked piece, worry about a threat, cheeky
+confidence or a comeback — plus the last 3 lines to avoid repeats. Praise only for moves the engine rates good
+or best; the opening is named once (and again when it changes). The commentator skips about half of the moves
+where nothing notable happened. Danish messages get the Danish piece names.
+
 Chat lines are "chess-smart": LLM players and the engines' LLM commentator get Chat facts from Stockfish — the
 opening name (Lichess CC0 opening list, `app/data/openings.tsv`), the engine's verdict on the opponent's last
 move and how to punish it, the evaluation, Stockfish's plan and threats — and are told to use one real idea

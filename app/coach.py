@@ -319,8 +319,8 @@ def explain_latest(game, coro):
     """Per-move explanations never queue up: a newer one replaces one that hasn't finished, so a fast player
     always gets the teacher's view of the current position and the LLM endpoint gets at most one call per game."""
     old = getattr(game, "teach_task", None)
-    if old and not old.done():
-        old.cancel()
+    if old and not old.done() and not getattr(old, "talking", False):
+        old.cancel()  # still waiting for a pause: replace it; one being written is allowed to finish
 
     async def run():
         try:
@@ -329,6 +329,7 @@ def explain_latest(game, coro):
         except asyncio.CancelledError:
             coro.close()
             raise
+        task.talking = True
         game.teach_busy = True
         game.touch()
         try:
@@ -337,7 +338,8 @@ def explain_latest(game, coro):
             game.teach_busy = False
             game.touch()
 
-    game.teach_task = background(run())
+    task = background(run())
+    game.teach_task = task
 
 
 async def explain_turn(game, kid: Optional[tuple], comp: Optional[tuple]):
