@@ -81,8 +81,15 @@ LLM_START_RATING = 600
 MODEL_KEYS: dict[tuple[str, str], str] = {}  # (endpoint name, model id) -> rating key (the real model behind aliases)
 
 
+def full_llm_key(model_key: str, endpoint: Optional[str]) -> str:
+    """Ratings are per real model *and* endpoint: one model can be served with different settings (e.g. thinking
+    on one port, no-think on another), which plays very differently."""
+    return model_key if " · " in model_key or not endpoint else f"{model_key} · {endpoint}"
+
+
 def new_llm_rating(key: str) -> dict:
-    return {"key": key, "name": key.rsplit("/", 1)[-1], "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
+    model, _, ep = key.partition(" · ")
+    return {"key": key, "name": f"{model.rsplit('/', 1)[-1]}{f' ({ep})' if ep else ''}", "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
             "l": 0, "history": [{"t": time.time(), "rating": LLM_START_RATING}], "created": time.time()}
 
 
@@ -134,14 +141,15 @@ async def probe_endpoint(name: str, url: str) -> Optional[list[str]]:
 async def resolve_model_key(endpoint: str, model: str) -> str:
     if (endpoint, model) not in MODEL_KEYS and endpoint in ENDPOINTS:
         await probe_endpoint(endpoint, ENDPOINTS[endpoint])
-    return MODEL_KEYS.get((endpoint, model), model)
+    return full_llm_key(MODEL_KEYS.get((endpoint, model), model), endpoint)
 
 
 def llm_key_of(p: dict) -> Optional[str]:
     """Rating key of an LLM player from a (possibly archived) game summary."""
     if p.get("type") != "llm":
         return None
-    return p.get("rating_key") or MODEL_KEYS.get((p.get("endpoint"), p.get("model"))) or p.get("model")
+    base = p.get("rating_key") or MODEL_KEYS.get((p.get("endpoint"), p.get("model"))) or p.get("model")
+    return full_llm_key(base, p.get("endpoint")) if base else None
 
 
 def elo_update(rec: dict, before: float, opp: float, score: float) -> int:
@@ -1037,6 +1045,31 @@ for f in sorted(GAMES_DIR.glob("*.json")):
         pass
 
 
+def migrate_llm_keys():
+    """Old ratings were per model only; attach the endpoint the model was played on (from the archive)."""
+    changed = False
+    for key in [k for k in LLM_RATINGS if " · " not in k]:
+        eps = {d[s].get("endpoint") for d in ARCHIVE.values() for s in ("white", "black")
+               if d[s].get("type") == "llm" and d[s].get("rating_key") == key}
+        eps.discard(None)
+        if len(eps) != 1:
+            continue
+        new = full_llm_key(key, eps.pop())
+        rec = LLM_RATINGS.pop(key)
+        rec["key"], rec["name"] = new, new_llm_rating(new)["name"]
+        LLM_RATINGS[new] = rec
+        for d in ARCHIVE.values():  # keep archived snapshots pointing at the renamed rating
+            for r in (d.get("ratings") or {}).values():
+                if r.get("llm") == key:
+                    r["llm"] = new
+        changed = True
+    if changed:
+        save_llm_ratings()
+
+
+migrate_llm_keys()
+
+
 async def run_match(games: list[Game]):
     for g in games:
         if g.status == "queued":
@@ -1060,9 +1093,9 @@ async def config():
     results = await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))
 
     def info(name, mid):
-        key = MODEL_KEYS.get((name, mid), mid)
+        key = full_llm_key(MODEL_KEYS.get((name, mid), mid), name)
         rec = LLM_RATINGS.get(key)
-        return {"key": key, "name": key, "rating": rec["rating"] if rec else LLM_START_RATING,
+        return {"key": key, "name": rec["name"] if rec else key, "rating": rec["rating"] if rec else LLM_START_RATING,
                 "games": rec["games"] if rec else 0}
 
     return {

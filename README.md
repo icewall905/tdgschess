@@ -30,7 +30,8 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).
   Guests are unrated. LLM models are rated the same way (`data/llm_ratings.json`, new models start at 600),
-  keyed by the real model behind the id: vLLM's `root`, or for "currentmodel"-style aliases the loaded model
+  keyed by the real model behind the id *and* the endpoint (so a thinking and a no-think port of the same
+  model are rated separately): vLLM's `root`, or for "currentmodel"-style aliases the loaded model
   from `/props` (or the endpoint's only real model). The rating shows when the model is picked in setup, in
   the player bar, Standings and on the Players page (🤖 Models). Self-play games don't count. On the first
   start the ratings are rebuilt from the archived games. Auto Stockfish plays even with a rated LLM.
