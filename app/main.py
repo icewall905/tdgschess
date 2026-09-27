@@ -89,7 +89,6 @@ def full_llm_key(model_key: str, endpoint: Optional[str]) -> str:
 
 def new_llm_rating(key: str) -> dict:
     model, _, ep = key.partition(" · ")
-    ep = ep.replace(" · SF hints", " + SF hints")
     return {"key": key, "name": f"{model.rsplit('/', 1)[-1]}{f' ({ep})' if ep else ''}", "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
             "l": 0, "history": [{"t": time.time(), "rating": LLM_START_RATING}], "created": time.time()}
 
@@ -150,6 +149,7 @@ def llm_key_of(p: dict) -> Optional[str]:
     if p.get("type") != "llm":
         return None
     base = p.get("rating_key") or MODEL_KEYS.get((p.get("endpoint"), p.get("model"))) or p.get("model")
+    base = base.removesuffix(" · SF hints") if base else base
     return full_llm_key(base, p.get("endpoint")) if base else None
 
 
@@ -176,7 +176,7 @@ class PlayerSpec(BaseModel):
     max_tokens: int = 8192
     show_legal: bool = False  # the Stockfish hints below are a clearer shortlist; turn on when hints are off
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
-    engine_hints: bool = True  # Stockfish's top 3 moves (0.5 s) + a game overview; rated separately as assisted
+    engine_hints: bool = True  # legacy field: LLM players always get Stockfish's top 3 (50 ms) + a game overview
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
     persona: str = ""  # optional character for the chat messages, e.g. "a friendly pirate"
@@ -264,6 +264,9 @@ class Analyzer:
 ANALYZER = Analyzer()
 
 
+HINT_SECONDS = 0.05  # short on purpose: a 0.5 s search made every LLM play like ~1700+
+
+
 class Advisor:
     """Stockfish's top moves for LLM players with engine hints (separate from the eval-bar engine)."""
 
@@ -271,7 +274,7 @@ class Advisor:
         self.engine = None
         self.lock = asyncio.Lock()
 
-    async def top_moves(self, board: chess.Board, n: int = 3, seconds: float = 0.5) -> list[dict]:
+    async def top_moves(self, board: chess.Board, n: int = 3, seconds: float = HINT_SECONDS) -> list[dict]:
         async with self.lock:
             try:
                 if self.engine is None:
@@ -586,14 +589,13 @@ class LLMPlayer:
                      f"{board_diagram(board)}")
         if board.is_check():
             parts.append("You are in CHECK - you must get out of check.")
-        if self.spec.engine_hints:
-            parts.append("Game overview:\n" + game_overview(board, self.color))
+        parts.append("Game overview:\n" + game_overview(board, self.color))
         if self.spec.hints:
             parts.append("Position facts (plain facts computed from the board, no evaluation - you must still choose the move yourself):\n" + position_facts(board, self.color))
         if advice:
             rows = [f"{i + 1}. {a['move']}  eval {eval_words(a['cp'], a['mate'])}  line: {' '.join(a['line'])}"
                     for i, a in enumerate(advice)]
-            parts.append("Engine suggestions (Stockfish, 0.5 s, best first; eval from your side):\n" + "\n".join(rows)
+            parts.append("Engine suggestions (quick Stockfish search, best first; eval from your side):\n" + "\n".join(rows)
                          + "\nThese are strong. Normally play one of them; only deviate for a clear reason.")
         if self.spec.show_legal:
             parts.append("Legal moves, by piece:\n" + legal_by_piece(board))
@@ -624,7 +626,7 @@ class LLMPlayer:
         side = "white" if self.color else "black"
         stats = self.game.stats[side]
         attempt, net_fails = 0, 0
-        advice = await ADVISOR.top_moves(board) if self.spec.engine_hints else None
+        advice = await ADVISOR.top_moves(board)
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             while attempt <= self.spec.retries:
                 messages = self.build_prompt(board, rejected, advice)
@@ -1124,8 +1126,20 @@ for f in sorted(GAMES_DIR.glob("*.json")):
 
 
 def migrate_llm_keys():
-    """Old ratings were per model only; attach the endpoint the model was played on (from the archive)."""
+    """Old ratings were per model only; attach the endpoint the model was played on (from the archive).
+    Stockfish hints were once optional and rated as "… · SF hints"; now they are the only mode, so that
+    rating becomes the model's rating (replacing the old no-hints one)."""
     changed = False
+    for key in [k for k in LLM_RATINGS if k.endswith(" · SF hints")]:
+        base = key.removesuffix(" · SF hints")
+        rec = LLM_RATINGS.pop(key)
+        rec["key"], rec["name"] = base, new_llm_rating(base)["name"]
+        LLM_RATINGS[base] = rec
+        for d in ARCHIVE.values():
+            for r in (d.get("ratings") or {}).values():
+                if r.get("llm") == key:
+                    r["llm"] = base
+        changed = True
     for key in [k for k in LLM_RATINGS if " · " not in k]:
         eps = {d[s].get("endpoint") for d in ARCHIVE.values() for s in ("white", "black")
                if d[s].get("type") == "llm" and d[s].get("rating_key") == key}
@@ -1204,7 +1218,7 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
         apply_profile(spec)
         if spec.type == "llm" and spec.endpoint and spec.model:
-            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model) + (" · SF hints" if spec.engine_hints else "")
+            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model)
         if spec.type == "human" and not spec.remote:
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):
