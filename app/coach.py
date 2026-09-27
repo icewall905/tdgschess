@@ -71,6 +71,107 @@ def in_danger(board: chess.Board, color: bool, min_value: int = 1) -> list[dict]
     return sorted(out, key=lambda d: -d["value"])
 
 
+CENTRE = {chess.D4, chess.D5, chess.E4, chess.E5}
+
+PRINCIPLES = {
+    "develop": "Get your knights and bishops out early - pieces at home can't help.",
+    "castle": "Castle early: it hides your king and brings a rook into the game.",
+    "centre": "Control the centre (d4, d5, e4, e5): pieces there reach more squares.",
+    "free": "Always check first: is there a piece you can take for free?",
+    "fork": "A fork attacks two things at once - the opponent can only save one.",
+    "pin": "A pinned piece can't move without exposing something bigger behind it.",
+    "threat": "Before every move, ask: what is my opponent threatening?",
+    "safety": "Keep your pieces protected - a loose piece is an easy target.",
+    "file": "Rooks love open files: lines with no pawns in the way.",
+    "check": "Checks force the answer - look at every check you have.",
+    "promote": "A pawn that reaches the last row becomes a queen!",
+    "trade": "When you are ahead, trading pieces makes your extra material count more.",
+}
+
+
+def move_reasons(board: chess.Board, move: chess.Move, color: bool) -> tuple[list[str], list[str]]:
+    """Concrete consequences of `move` for the side `color` (who is to move), worked out with python-chess:
+    what it takes, attacks, pins, defends, prepares. Returns (reasons, principle keys)."""
+    reasons, keys = [], []
+    p = board.piece_at(move.from_square)
+    after = board.copy()
+    after.push(move)
+    to = move.to_square
+    victim = board.piece_at(to) or (chess.Piece(chess.PAWN, not color) if board.is_en_passant(move) else None)
+    if after.is_checkmate():
+        return ["it is checkmate - the game is won"], ["check"]
+    if victim:
+        safe = not after.attackers(not color, to)
+        cheap = VALUES[p.piece_type] < VALUES[victim.piece_type]
+        reasons.append(f"it takes the {NAMES[victim.piece_type]} on {chess.square_name(to)}"
+                       + (" for free (nothing can take back)" if safe else " and wins material" if cheap else ""))
+        if safe or cheap:
+            keys.append("free")
+    if after.is_check():
+        reasons.append("it gives check, so the opponent has to deal with the king first")
+        keys.append("check")
+    if board.is_castling(move):
+        reasons.append("it castles: the king gets safe and the rook comes into the game")
+        keys.append("castle")
+    # new attacks by the moved piece
+    hit = [sq for sq in after.attacks(to) if after.piece_at(sq) and after.piece_at(sq).color != color
+           and (VALUES[after.piece_type_at(sq)] >= 3 or after.piece_type_at(sq) == chess.KING)
+           and sq not in board.attacks(move.from_square)]
+    if len(hit) >= 2:
+        reasons.append("it is a fork: it attacks " + " and ".join(piece_on(after, s) for s in hit) + " at the same time")
+        keys.append("fork")
+    elif hit and after.piece_type_at(hit[0]) != chess.KING:
+        reasons.append(f"it attacks the {piece_on(after, hit[0])}")
+    # pins created
+    for sq, q in after.piece_map().items():
+        if q.color != color and q.piece_type != chess.KING and after.is_pinned(not color, sq) and not board.is_pinned(not color, sq):
+            reasons.append(f"it pins the {piece_on(after, sq)} - it can't move without exposing its king")
+            keys.append("pin")
+            break
+    # safety: rescues an attacked piece, or protects one
+    before_danger = {d["square"] for d in in_danger(board, color, 3)}
+    after_danger = {d["square"] for d in in_danger(after, color, 3)}
+    if chess.square_name(move.from_square) in before_danger and chess.square_name(to) not in after_danger:
+        reasons.append(f"it moves the {NAMES[p.piece_type]} away from danger")
+        keys.append("safety")
+    saved = before_danger - after_danger - {chess.square_name(move.from_square)}
+    if saved:
+        reasons.append("it protects the " + ", ".join(piece_on(after, chess.parse_square(s)) for s in saved))
+        keys.append("safety")
+    # development / centre / files / promotion
+    home = chess.BB_RANK_1 if color else chess.BB_RANK_8
+    if p.piece_type in (chess.KNIGHT, chess.BISHOP) and chess.BB_SQUARES[move.from_square] & home:
+        reasons.append(f"it develops the {NAMES[p.piece_type]} from its starting square")
+        keys.append("develop")
+    if to in CENTRE or (p.piece_type != chess.PAWN and len(after.attacks(to) & chess.SquareSet(CENTRE)) >= 2):
+        reasons.append("it takes control of the centre")
+        keys.append("centre")
+    if p.piece_type == chess.ROOK:
+        f = chess.square_file(to)
+        if not any(board.piece_at(chess.square(f, r)) == chess.Piece(chess.PAWN, color) for r in range(8)):
+            reasons.append(f"the rook goes to the open {chess.FILE_NAMES[f]}-file")
+            keys.append("file")
+    if move.promotion:
+        reasons.append(f"the pawn promotes to a {NAMES[move.promotion]}")
+        keys.append("promote")
+    return reasons, keys
+
+
+def follow_up(board: chess.Board, line_moves: list[chess.Move], color: bool) -> Optional[str]:
+    """What happens next in Stockfish's line, in words: "they answer X, then you play Y (it takes ...)"."""
+    if len(line_moves) < 2:
+        return None
+    b = board.copy()
+    b.push(line_moves[0])
+    reply = move_words(b, line_moves[1])
+    b.push(line_moves[1])
+    text = f"if the opponent answers {reply}"
+    if len(line_moves) >= 3:
+        nxt, _ = move_reasons(b, line_moves[2], color)
+        text += f", you continue with {move_words(b, line_moves[2])}" + (f" ({nxt[0]})" if nxt else "")
+    return text
+
+
 class CoachEngine:
     """Its own Stockfish (full strength) for learning mode; one shared process, calls queue on a lock."""
 
@@ -108,7 +209,8 @@ class CoachEngine:
                 rb.push(pv[0])
                 reply_words = move_words(rb, pv[1])
             out.append({"move": pv[0], "san": line[0], "words": move_words(board, pv[0]), "line": line,
-                        "reply_words": reply_words, "cp": score.score(mate_score=100000), "mate": score.mate()})
+                        "pv": pv[:5], "reply_words": reply_words, "cp": score.score(mate_score=100000),
+                        "mate": score.mate()})
         return out
 
 
@@ -131,12 +233,36 @@ async def analyse(board: chess.Board, color: bool) -> dict:
             if t[0]["mate"] and t[0]["mate"] > 0 or gain > 150:
                 threat = {"san": t[0]["san"], "words": t[0]["words"], "mate": t[0]["mate"]}
     mat = {c: sum(VALUES[p.piece_type] for p in board.piece_map().values() if p.color == c) for c in (True, False)}
+    principles = []
+    if kid_to_move:
+        for t in top[:2]:
+            t["reasons"], keys = move_reasons(board, t["move"], color)
+            t["next"] = follow_up(board, t.get("pv") or [], color)
+            principles += [k for k in keys if k not in principles]
+        if threat:
+            principles.insert(0, "threat")
+        if mat[color] - mat[not color] >= 3:
+            principles.append("trade")
     return {
         "kid_to_move": kid_to_move, "cp": cp, "mate": mate, "eval": eval_words(cp, mate),
         "top": top if kid_to_move else [], "opponent_plan": top[0]["line"] if top and not kid_to_move else None,
         "threat": threat, "danger": in_danger(board, color), "targets": in_danger(board, not color),
         "material": mat[color] - mat[not color], "overview": main().game_overview(board, color),
+        "principles": [PRINCIPLES[k] for k in principles[:2]],
     }
+
+
+async def tempting_mistake(board: chess.Board, color: bool, top: list[dict]) -> Optional[dict]:
+    """A natural-looking move (a capture or check that isn't among the best) that goes wrong, and why."""
+    best = {t["move"] for t in top}
+    cands = [m for m in board.legal_moves if m not in best and (board.is_capture(m) or board.gives_check(m))]
+    cands.sort(key=lambda m: -(VALUES[board.piece_type_at(m.to_square)] if board.piece_at(m.to_square) else 0))
+    for m in cands[:2]:
+        r = await review(board, m, color)
+        if r["cls"] in ("mistake", "blunder"):
+            why = r["motifs"][0] if r["motifs"] else (f"the answer {r['reply']['words']} is strong" if r["reply"] else "")
+            return {"san": r["san"], "words": r["words"], "why": why}
+    return None
 
 
 async def review(board: chess.Board, move: chess.Move, color: bool) -> dict:
@@ -211,6 +337,10 @@ def facts_text(a: dict, who: str) -> str:
             if len(t["line"]) > 1:  # spell out the reply, so "won't you just take my rook?" gets a true answer
                 answer = f"; the computer answers {t['reply_words']}" if t.get("reply_words") else f"; the computer answers {t['line'][1]}"
             lines.append(f"  {i + 1}. {t['words']} ({eval_words(t['cp'], t['mate'])}){answer}; line: {' '.join(t['line'])}")
+            if t.get("reasons"):
+                lines.append(f"     why it is good: {'; '.join(t['reasons'])}")
+            if t.get("next"):
+                lines.append(f"     what happens next: {t['next']}")
     if a.get("opponent_plan"):
         lines.append(f"- The computer's plan: {' '.join(a['opponent_plan'])}")
     if a["threat"]:
@@ -222,6 +352,11 @@ def facts_text(a: dict, who: str) -> str:
     if a["targets"]:
         lines.append(f"- Opponent pieces {who} could win: " + "; ".join(
             f"{d['piece']} on {d['square']}" for d in a["targets"]))
+    if a.get("mistake"):
+        m = a["mistake"]
+        lines.append(f"- Tempting but bad: {m['words']} - {m['why']}")
+    if a.get("principles"):
+        lines.append("- Chess principles that fit here: " + " / ".join(a["principles"]))
     lines.append(a["overview"])
     return "\n".join(lines)
 
@@ -245,7 +380,8 @@ Rules:
 - Every claim about moves, threats or who is better must come from the ENGINE FACTS you are given. If the facts \
 don't say it, don't claim it. Never invent moves or pieces.
 - Name pieces and squares in words ("your knight on f3"), not chess notation soup.
-- Short, friendly sentences. Encourage the child; mistakes are how we learn. No scary or mean words.
+- Short, friendly sentences with simple words. If you use a chess word (fork, pin, castle, develop), explain it
+  in a few words. Encourage the child; mistakes are how we learn. No scary or mean words.
 - {lang}"""
 
 
@@ -394,10 +530,12 @@ async def explain_blunder(game, board: chess.Board, rev: dict):
 async def hint(game) -> dict:
     color, who = learner(game)
     a = await analyse(game.board, color)
-    user = (f"{facts_text(a, who)}\n\nThe child asks for a hint. First give a gentle nudge about what to look for "
-            "(a threat, a piece in danger, a good plan). Then suggest 1-2 of the engine's best moves and explain "
-            "simply why they are good. At most 3 short sentences.")
-    text = await llm(game, user, 350) or away(game)
+    if a["top"]:
+        a["mistake"] = await tempting_mistake(game.board, color, a["top"])
+    user = (f"{facts_text(a, who)}\n\nThe child asks for a hint. In 3-5 short sentences: a gentle nudge about what "
+            "to look for (a threat, a piece in danger, a plan), then the best move with its concrete reasons from "
+            "'why it is good' and what happens next, and the chess principle behind it.")
+    text = await llm(game, user, 500) or away(game)
     arrows = [{"from": chess.square_name(t["move"].from_square), "to": chess.square_name(t["move"].to_square),
                "color": "green"} for t in a["top"][:2]]
     squares = [d["square"] for d in a["danger"][:2]]
@@ -430,10 +568,16 @@ async def answer(game, question: str) -> dict:
                 checked.append(await review(board, mv, color))
                 break
     extra = "\n".join(review_text(r, who) for r in checked)
+    deep = bool(main().DEEP_Q.search(question))
+    if deep and a["top"]:
+        a["mistake"] = await tempting_mistake(board, color, a["top"])
     user = (f"{facts_text(a, who)}\n{('Moves the child asked about (engine-checked):' + chr(10) + extra) if extra else ''}\n"
-            f"{conversation(game)}\n\nThe child asks: \"{question}\"\nAnswer kindly and simply in 2-5 short sentences, "
-            "using only the engine facts.")
-    text = await llm(game, user, 450) or away(game)
+            f"{conversation(game)}\n\nThe child asks: \"{question}\"\n"
+            + ("They want to understand WHY. Explain it like to a child, in 4-5 short, simple sentences: the move or "
+               "idea, what it concretely does on the board (from 'why it is good'), what will probably happen next, "
+               "and the chess rule of thumb behind it; if listed, one tempting move to avoid." if deep else
+               "Answer kindly and simply in 2-5 short sentences.") + " Use only the engine facts.")
+    text = await llm(game, user, 600 if deep else 450) or away(game)
     arrows = [x for r in checked for x in r["arrows"]][:4]
     add_teach(game, text, arrows, [s for r in checked for s in r["squares"]], reply_to=question)
     return {"ok": True}

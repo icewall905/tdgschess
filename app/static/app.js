@@ -366,10 +366,14 @@ const ARROW_COLORS = { green: "rgba(21,140,40,.78)", red: "rgba(220,40,40,.8)", 
 
 // arrows/highlights to show: a pending blunder review, else the teacher entry the user clicked,
 // else the latest teacher entry for the position on screen
-let selectedTeach = null;
+let selectedTeach = null, selectedChat = null;
 function boardMarks(ply) {
   const out = { arrows: [], squares: [] };
-  if (!game?.learning || !$("#teach-arrows").checked) return out;
+  if (!game || !$("#teach-arrows").checked) return out;
+  // chat suggestions (any game): the clicked one, else the latest one for the position on screen
+  const chatSrc = selectedChat != null ? game.log[selectedChat]
+    : [...game.log].reverse().find((e) => e.kind === "chat" && e.bot && e.arrows?.length && e.ply === ply && ply === game.san.length);
+  if (!game.learning) { if (chatSrc) out.arrows = [...chatSrc.arrows]; return out; }
   let src = null;
   if (game.review && ply === game.san.length) src = game.review;
   else if (selectedTeach != null) src = game.log[selectedTeach];
@@ -753,7 +757,10 @@ function renderChat(force) {
       const e = chats[ci++];
       const key = `${game.id}:c${e.i}`;
       if (!spoken.has(key)) { spoken.add(key); if (!firstLoad) speak(e.say, e.side); }
-      items.push(bubble(e.side, game[e.side].label, null, e.say, e.bot ? "reply" : "human"));
+      const node = bubble(e.side, game[e.side].label, e.arrows?.length ? "🏹" : null, e.say,
+        `${e.bot ? "reply" : "human"}${e.arrows?.length ? " has-arrows" : ""}${selectedChat === e.i ? " cur" : ""}`);
+      if (e.arrows?.length) node.onclick = () => { selectedChat = selectedChat === e.i ? null : e.i; chatSig = ""; renderChat(true); renderBoard(); };
+      items.push(node);
     }
   };
   const cur = shownPly();
@@ -959,7 +966,7 @@ async function poll(force = false) {
       const answers = (x) => x.log.filter((e) => e.kind === "teach" && (e.reply_to || e.kind_detail === "hint")).length;
       teachPending = Math.max(0, teachPending - (answers(s) - answers(prev)));
     }
-    if (first) { selectedTeach = null; teachPending = 0; }
+    if (first) { selectedTeach = null; selectedChat = null; teachPending = 0; }
     game = s;
     if (first && s.learning) setTab("teach");
     else if (first && store.get("infoTab", "chat") === "teach" && !s.learning) setTab("chat");

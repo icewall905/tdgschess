@@ -106,6 +106,15 @@ where nothing notable happened. Danish messages get the Danish piece names. Worn
 message: a good-game in character, the turning point (largest eval swing) and one tip. Hint answers list the
 computer's reply to each suggested move, so questions like "won't you just take my rook?" get a true answer.
 
+Explaining *why* (`coach.move_reasons`): for the best moves, python-chess works out the concrete consequences —
+what it takes (and whether for free), checks, forks, pins, attacks, rescuing or protecting a piece, developing,
+castling, the centre, open files, promotion — plus what happens next in Stockfish's line ("if they answer X, you
+continue with Y (it takes the queen)"), a tempting capture/check that goes wrong ("Tempting but bad"), and 1-2
+kid-friendly chess principles that fit. Questions with "why/hvorfor/forklar" get a 4-5 sentence child-level
+explanation (move, what it does, what happens next, rule of thumb, what to avoid); help questions get the move
+plus its main reason. Chat suggestions draw arrows on the board (green move, orange reply, blue follow-up;
+click the 🏹 message to show them; the 🏹 arrows switch applies).
+
 Chat lines are "chess-smart": LLM players and the engines' LLM commentator get Chat facts from Stockfish — the
 opening name (Lichess CC0 opening list, `app/data/openings.tsv`), the engine's verdict on the opponent's last
 move and how to punish it, the evaluation, Stockfish's plan and threats — and are told to use one real idea

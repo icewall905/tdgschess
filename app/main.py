@@ -972,13 +972,20 @@ def unread_chat(game, side: str) -> list[str]:
             for e in game.log[seen:] if e.get("kind") == "chat" and e.get("side") != side and not e.get("bot")]
 
 
+DEEP_Q = re.compile(r"hvorfor|why|forklar|explain|hvordan|how come|hvad gør", re.I)
+HELP_Q = re.compile(r"hvad skal|what should|anbefal|recommend|foresl|suggest|tip|hjælp|help|hint|"
+                    r"næste træk|next move|hvad nu|what now|best move|bedste træk", re.I)
+
+
 def has_unread_chat(game, side: str) -> bool:
     return any(e.get("kind") == "chat" and e.get("side") != side and not e.get("bot")
                for e in game.log[game.chat_seen.get(side, 0):])
 
 
 CHAT_REPLY_PROMPT = """You are {persona}, playing {color} in a chess game that children are watching and playing. \
-A player just wrote in the game chat. Reply in 1-3 short sentences, kind and fun, in character. Answer the \
+A player just wrote in the game chat - most players are children (about 6-12), so use simple words and short \
+sentences a child understands; if you use a chess word like fork, pin or castle, explain it in a few words. \
+Reply in 1-3 short sentences, kind and fun, in character. Answer the \
 question directly; don't start every reply with a greeting or their name, and avoid empty words like "super \
 strong" - say concretely what a move does (what it attacks, takes, defends or threatens, and what the answer is).
 Always keep the conversation on THIS chess game: if they ask about something else, answer in a few friendly words \
@@ -1015,18 +1022,32 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     persona = spec.persona.strip() or "a cheerful chess buddy"
-    helping = ""
+    helping, arrows = "", []
     opp = game.spec_for(not color)
+    asked = " ".join(unread).lower()
+    deep = bool(DEEP_Q.search(asked))
+    wants_help = deep or bool(HELP_Q.search(asked))
     if opp.type == "human":  # the player's own side, in case they ask for a hint
         try:
             a = await coach.analyse(board, not color)
+            if wants_help and a["top"]:
+                a["mistake"] = await coach.tempting_mistake(board, not color, a["top"])
+                pv = a["top"][0].get("pv") or [a["top"][0]["move"]]
+                arrows = [{"from": chess.square_name(m.from_square), "to": chess.square_name(m.to_square), "color": c}
+                          for m, c in zip(pv[:3], ("green", "orange", "blue"))]
             helping = f"\n\nFacts for the player {opp.label()} (only use if they ask for help):\n" + coach.facts_text(a, opp.label())
         except Exception:
             pass
     user = ("Chess facts (from Stockfish, from your side):\n" + "\n".join(f"- {f}" for f in facts) + helping
             + f"\n\nRecent chat:\n{history}\n\nNew messages to answer:\n" + "\n".join(f"- {m}" for m in unread)
+            + ("\n\nThey want to understand WHY. Explain it like to a child, in 4-5 short, simple sentences: the move "
+               "to play, what it concretely does (from 'why it is good' - a picture they can see on the board), what "
+               "will probably happen next, and the chess rule of thumb behind it; if listed, one tempting move to "
+               "avoid and why." if deep else
+               "\n\nThey ask for help: name the move, then its most important concrete reason and what happens "
+               "next, in 2-3 short sentences." if wants_help else "")
             + "\n\nReply with only your chat message.")
-    body = {"model": model, "temperature": 0.7, "max_tokens": 300,
+    body = {"model": model, "temperature": 0.7, "max_tokens": 600 if deep else 350,
             "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": CHAT_REPLY_PROMPT.format(
                 persona=persona, color="White" if color else "Black", lang=chat_lang_line(game))},
@@ -1043,7 +1064,7 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     text = re.sub(r"^\s*(SAY|MOVE)\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
     if text:
         game.add_log({"ply": len(game.board.move_stack), "side": side, "kind": "chat", "bot": True,
-                      "say": text[:400], "t": time.time()})
+                      "say": text[:900], "arrows": arrows, "t": time.time()})
 
 
 CLOSING_PROMPT = """You are {persona}, and a chess game you played as {color} against {opp} just ended. Write the \
