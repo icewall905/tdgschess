@@ -246,7 +246,8 @@ class SayReq(BaseModel):
 
 # ---------------------------------------------------------------- analysis
 
-ENGINE_IDLE = float(os.environ.get("ENGINE_IDLE", "300"))  # seconds without use before a Stockfish is shut down
+ENGINE_IDLE = float(os.environ.get("ENGINE_IDLE", "300"))
+HIBERNATE_AFTER = float(os.environ.get("HIBERNATE_AFTER", "3600"))  # s without any player viewing a live game  # seconds without use before a Stockfish is shut down
 
 
 class LazyEngine:
@@ -366,10 +367,51 @@ def eval_words(cp: int, mate: Optional[int]) -> str:
     return f"{pawns:+.1f} ({mood})"
 
 
+OPENINGS: dict[str, tuple[str, str]] = {}  # position (EPD) -> (ECO code, name), from the Lichess CC0 data set
+
+
+def load_openings():
+    try:
+        lines = (Path(__file__).parent / "data" / "openings.tsv").read_text().splitlines()
+    except FileNotFoundError:
+        return
+    for line in lines:
+        if line.startswith(("#", "eco\t")):
+            continue
+        eco, name, pgn = line.split("\t")
+        b = chess.Board()
+        try:
+            for tok in pgn.split():
+                if not tok[0].isdigit():
+                    b.push_san(tok)
+        except ValueError:
+            continue
+        OPENINGS[b.epd()] = (eco, name)
+
+
+load_openings()
+
+
+def opening_of(board: chess.Board) -> Optional[str]:
+    """Name of the opening the game is in (the latest known position, so transpositions count too)."""
+    b = board.copy()
+    for _ in range(min(len(b.move_stack), 40) + 1):
+        hit = OPENINGS.get(b.epd())
+        if hit:
+            return f"{hit[1]} ({hit[0]})"
+        if not b.move_stack:
+            break
+        b.pop()
+    return None
+
+
 def game_overview(board: chess.Board, color: bool) -> str:
     n = sum(PIECE_VALUES[p.piece_type] for p in board.piece_map().values() if p.piece_type != chess.PAWN)
     phase = "opening" if board.fullmove_number <= 10 and n > 50 else "endgame" if n <= 26 else "middlegame"
     lines = [f"Move {board.fullmove_number}, {phase}."]
+    opening = opening_of(board)
+    if opening:
+        lines.append(f"Opening: {opening}")
     b = board.copy()
     recent = []
     for _ in range(min(6, len(b.move_stack))):
@@ -579,6 +621,8 @@ The message is 1-2 short sentences (at most 25 words) that react to the opponent
 own move in a cute, funny, kind way that fits the position (proud of a capture, "oops!" after losing a piece,
 excited about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and
 kid-friendly: never mean, scary or rude. Speak in character{persona}. {lang}
+Make it chess-smart: build the message on one real idea from the "Chat facts" (the opening's name, what your move
+does or plans, a threat, whether the opponent's move was strong or a mistake) - while staying in character.
 Vary your messages: start each one differently (not "Wow", "Hello" or the same exclamation every time) and
 don't repeat what you said in your recent messages."""
 
@@ -655,6 +699,8 @@ class LLMPlayer:
                          + "\nThese are strong. Normally play one of them; only deviate for a clear reason.")
         if self.spec.show_legal:
             parts.append("Legal moves, by piece:\n" + legal_by_piece(board))
+        if self.spec.chat and getattr(self, "chat_facts", None):
+            parts.append("Chat facts (from Stockfish, for your SAY line):\n" + "\n".join(f"- {f}" for f in self.chat_facts))
         if self.spec.chat and getattr(self, "unread", None):
             parts.append("The players wrote in the chat since your last move - answer them (kindly, briefly) in your "
                          "SAY line:\n" + "\n".join(f"- {m}" for m in self.unread))
@@ -687,6 +733,7 @@ class LLMPlayer:
         attempt, net_fails = 0, 0
         advice = None if self.spec.pure else await ADVISOR.top_moves(board)
         self.unread = unread_chat(self.game, "white" if self.color else "black") if self.spec.chat else []
+        self.chat_facts = await chat_context(board, self.color) if self.spec.chat else []
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             while attempt <= self.spec.retries:
                 messages = self.build_prompt(board, rejected, advice)
@@ -784,6 +831,42 @@ def soften(elo: float, advantage_cp: int) -> float:
     return elo - min(1.0, (advantage_cp - 150) / 600) * 350
 
 
+async def chat_context(board: chess.Board, color: bool) -> list[str]:
+    """Stockfish facts that let even a small model chat like a chess expert: the opening, how good the opponent's
+    last move was and what it allows, the best plan now and threats. `board` is before `color`'s move."""
+    facts = []
+    opening = opening_of(board)
+    if opening:
+        facts.append(f"Opening: {opening}")
+    if board.move_stack:
+        prev = board.copy()
+        last = prev.pop()
+        try:
+            r = await coach.review(prev, last, prev.turn)
+            verdict = {"best": "the best move", "good": "a good move", "inaccuracy": "a small inaccuracy",
+                       "mistake": "a mistake", "blunder": "a big blunder"}[r["cls"]]
+            line = f"The opponent's last move {r['words']} was {verdict} (engine)"
+            if r["cls"] in ("mistake", "blunder") and r["reply"]:
+                line += f"; you can punish it with {r['reply']['words']}"
+            if r["motifs"]:
+                line += "; " + "; ".join(r["motifs"])
+            facts.append(line)
+        except Exception:
+            pass
+    try:
+        a = await coach.analyse(board, color)
+        facts.append(f"The position for you: {a['eval']}")
+        if a["top"]:
+            facts.append(f"Stockfish's plan for you: {' '.join(a['top'][0]['line'])} (starting with {a['top'][0]['words']})")
+        if a["threat"]:
+            facts.append(f"The opponent threatens {a['threat']['words']}")
+        if a["targets"]:
+            facts.append("Opponent pieces you can attack or win: " + ", ".join(f"{d['piece']} on {d['square']}" for d in a["targets"][:2]))
+    except Exception:
+        pass
+    return facts
+
+
 def unread_chat(game, side: str) -> list[str]:
     """Players' chat messages the LLM on `side` hasn't answered yet (it answers once, with its next move)."""
     seen = game.chat_seen.get(side, 0)
@@ -802,7 +885,9 @@ def chat_lang_line(game) -> str:
 COMMENT_PROMPT = """You are {persona}. You are the chess engine {engine}, playing {color} against {opp} in a game \
 watched by children. You just made a move. Write ONE short chat message (1-2 sentences, at most 25 words) that \
 reacts to what just happened in a cute, funny, kind way (proud of a capture, "oops" after losing a piece, excited \
-about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and kid-friendly: \
+about a check, a friendly compliment for a good opponent move). Use one real idea from the "Chat facts" (the \
+opening's name, a threat, whether the opponent's move was strong or a mistake) so you sound like a chess expert, \
+while staying in character. Emojis are welcome. Be sporting and kid-friendly: \
 never mean, scary or rude. Reply with only the message. {lang}"""
 
 COMMENT_TASKS: set = set()  # keep references so fire-and-forget tasks aren't garbage collected
@@ -863,10 +948,20 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
                                                                 color="White" if color else "Black", opp=opp)},
             {"role": "user", "content": "\n".join(facts)},
         ],
-        "temperature": 0.8, "max_tokens": 600, **spec.extra,
+        "temperature": 0.8, "max_tokens": 600, "chat_template_kwargs": {"enable_thinking": False}, **spec.extra,
     }
 
     async def run():
+        # expert context from Stockfish (opening, verdict on the opponent's move, threats, what comes next)
+        extra = [f for f in await chat_context(board, color) if not f.startswith(("Stockfish's plan", "The position for you"))]
+        try:
+            nxt = await coach.ENGINE.top(after, 1)
+            if nxt:
+                extra.append(f"Stockfish expects the game to continue: {' '.join(nxt[0]['line'])}")
+        except Exception:
+            pass
+        if extra:
+            body["messages"][1]["content"] += "\nChat facts (from Stockfish):\n" + "\n".join(f"- {f}" for f in extra)
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
                 r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
@@ -997,6 +1092,8 @@ class Game:
         self.ratings: dict[str, dict] = {}  # side -> {"profile", "before", "after", "delta"}
         self.engine_elo: dict[str, list[float]] = {"white": [], "black": []}
         self.review: Optional[dict] = None  # learning mode: a blunder waiting for "undo" / "keep"
+        self.last_seen = time.time()  # last time any device looked at or played in this game
+        self.hibernating = False
         self.teach_task: Optional[asyncio.Task] = None  # learning: the running per-turn explanation
         self.teach_busy = False
         self.teach_kid: Optional[tuple] = None  # learner's last move, explained together with the reply
@@ -1117,14 +1214,15 @@ class Game:
     async def run(self):
         self.status = "running"
         for side in ("white", "black"):
-            self.snapshot_rating(side)
+            if side not in self.ratings:  # a resumed game keeps its original "before" ratings
+                self.snapshot_rating(side)
         self.touch()
         players = {chess.WHITE: make_player(self.white, chess.WHITE, self),
                    chess.BLACK: make_player(self.black, chess.BLACK, self)}
         try:
             for p in players.values():
                 await p.start()
-            if self.opts.analysis:
+            if self.opts.analysis and not self.evals:
                 self.evals.append(await ANALYZER.evaluate(self.board))
             while True:
                 b = self.board
@@ -1160,6 +1258,8 @@ class Game:
                     self.evals.append(await ANALYZER.evaluate(b))
                     self.touch()
         except asyncio.CancelledError:
+            if self.hibernating:
+                raise  # saved as "hibernated" already; it can be resumed
             self.status, self.termination = "aborted", "aborted"
             self.thinking_since = None
             self.touch()
@@ -1462,13 +1562,90 @@ async def standings():
 def get_game(gid) -> Game:
     if gid not in GAMES:
         raise HTTPException(404, "game not found or not live")
+    GAMES[gid].last_seen = time.time()
     return GAMES[gid]
+
+
+def public(d: dict) -> dict:
+    return {k: v for k, v in d.items() if k != "resume"}  # resume data holds the devices' seat ids
+
+
+# ---------------------------------------------------------------- hibernation
+
+def hibernate(g: Game, reason: str):
+    """Park a live game on disk (it can be resumed later) and stop its task and engines."""
+    g.hibernating = True
+    d = g.state(full=True)
+    d.update(status="hibernated", termination=reason, thinking_for=None, review=None, human_turn=False, legal=[],
+             resume={"host": g.host, "seats": {side: sp._seat for side, sp in (("white", g.white), ("black", g.black))}})
+    (GAMES_DIR / f"{g.id}.json").write_text(json.dumps(d))
+    ARCHIVE[g.id] = d
+    GAMES.pop(g.id, None)
+    if g.task and not g.task.done():
+        g.task.cancel()
+    for other in GAMES.values():  # later games of the same match won't start on their own
+        if other.match_id == g.match_id and other.status == "queued":
+            other.status, other.termination = "aborted", "aborted"
+            other.touch()
+
+
+async def hibernate_idle_games():
+    while True:
+        await asyncio.sleep(min(60, HIBERNATE_AFTER / 2))
+        now = time.time()
+        for g in list(GAMES.values()):
+            if (g.status == "running" and now - g.last_seen > HIBERNATE_AFTER
+                    and "human" in (g.white.type, g.black.type)):
+                hibernate(g, f"hibernated: no players for {round(HIBERNATE_AFTER / 60)} min")
+
+
+@app.on_event("startup")
+async def start_hibernator():
+    asyncio.create_task(hibernate_idle_games())
+
+
+@app.on_event("shutdown")
+async def hibernate_on_shutdown():
+    for g in list(GAMES.values()):
+        if g.status == "running":
+            hibernate(g, "hibernated: the server restarted")
+
+
+@app.post("/api/games/{gid}/resume")
+async def resume(gid: str, x_client_id: Optional[str] = Header(None)):
+    d = ARCHIVE.get(gid)
+    if gid in GAMES:
+        return {"id": gid}
+    if not d or d.get("status") != "hibernated":
+        raise HTTPException(409, "that game is not hibernated")
+    fields = PlayerSpec.model_fields
+    white = PlayerSpec(**{k: v for k, v in d["white"].items() if k in fields})
+    black = PlayerSpec(**{k: v for k, v in d["black"].items() if k in fields})
+    opts = NewGame(**d["opts"])
+    g = Game(white, black, opts, d["match_id"], d["index"])
+    g.id, g.created = gid, d["created"]
+    for u in d["uci"]:
+        g.board.push_uci(u)
+    g.log, g.stats, g.evals, g.ratings = d["log"], d["stats"], d.get("evals") or [], d.get("ratings") or {}
+    res = d.get("resume") or {}
+    g.host = res.get("host") or x_client_id
+    for side, sp in (("white", white), ("black", black)):
+        sp._seat = (res.get("seats") or {}).get(side)
+        if sp.type == "human" and not sp.remote and sp._seat is None:
+            sp._seat = x_client_id
+    if "human" in (white.type, black.type):
+        g.code = new_code()
+    ARCHIVE.pop(gid, None)
+    GAMES[gid] = g
+    g.task = asyncio.create_task(run_match([g]))
+    return {"id": gid}
 
 
 @app.get("/api/games/{gid}")
 async def game_state(gid: str, since: int = -1, x_client_id: Optional[str] = Header(None)):
     if gid in GAMES:
         g = GAMES[gid]
+        g.last_seen = time.time()
         if since == g.version:
             # long poll: answer as soon as something changes, so the other device sees moves instantly
             try:
@@ -1477,7 +1654,7 @@ async def game_state(gid: str, since: int = -1, x_client_id: Optional[str] = Hea
                 return {"unchanged": True, "version": g.version}
         return g.state(cid=x_client_id)
     if gid in ARCHIVE:
-        return ARCHIVE[gid]
+        return public(ARCHIVE[gid])
     raise HTTPException(404, "game not found")
 
 

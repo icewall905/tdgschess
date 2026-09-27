@@ -647,6 +647,10 @@ function renderStatus() {
     const p = game[game.turn];
     line(`${game.turn === "white" ? "⚪" : "⚫"} ${game.human_turn ? "Your move!" : `${p.label} to move`}${game.check ? " — check! ⚡" : ""}`,
       [`Move ${Math.floor(game.san.length / 2) + 1}`, match, game.code ? `code ${game.code}` : ""].filter(Boolean).join(" · "));
+  } else if (game.status === "hibernated") {
+    el.replaceChildren(h("span", { class: "big" }, "💤 Hibernated"),
+      h("span", { class: "sub" }, `${game.termination.replace("hibernated: ", "")} — you can pick it up where you left off.`),
+      h("button", { class: "primary resume-big", type: "button", onclick: () => resumeGame(game.id) }, "▶ Resume game"));
   } else line(game.status === "queued" ? "⏳ Waiting to start" : `⏹ ${game.status}`,
     [game.termination && game.termination !== game.status ? game.termination : "", match].filter(Boolean).join(" · "));
   const live = game.status === "running" || game.status === "queued";
@@ -987,6 +991,12 @@ setInterval(() => { if (game?.thinking_for != null && game.status === "running")
 // ------------------------------------------------------------ lists
 const fmtTime = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 
+async function resumeGame(id) {
+  try { await api(`/api/games/${id}/resume`, { method: "POST" }); } catch (e) { alert(e.message); return; }
+  game = null;
+  openGame(id);
+}
+
 async function renderGames() {
   const list = await api("/api/games");
   const t = $("#games-table");
@@ -998,7 +1008,9 @@ async function renderGames() {
       h("td", { class: "res" }, g.result, g.learning ? h("span", { class: "pill learn", title: "Learning game (not rated)" }, "🎓") : null), h("td", {}, g.plies),
       h("td", {}, h("span", { class: `pill ${g.status}` }, g.status)),
       h("td", { class: "muted", title: g.termination || "" }, g.termination || ""),
-      h("td", {}, ["finished", "aborted", "error"].includes(g.status) ? h("button", {
+      h("td", {}, g.status === "hibernated" ? h("button", {
+        class: "resume", onclick: async (e) => { e.stopPropagation(); await resumeGame(g.id); },
+      }, "▶ Resume") : null, ["finished", "aborted", "error", "hibernated"].includes(g.status) ? h("button", {
         onclick: async (e) => { e.stopPropagation(); if (confirm("Delete this game?")) { await api(`/api/games/${g.id}`, { method: "DELETE" }); renderGames(); } },
       }, "✕") : ""))));
   if (!list.length) t.append(h("tr", {}, h("td", { class: "muted" }, "No games yet.")));

@@ -444,3 +444,6 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .teach-controls .row button { flex: 1; font-size: 14px; padding: 8px; }
 .teach-controls form { display: flex; gap: 6px; }
 .pill.learn { margin-left: 6px; }
+.pill.hibernated { color: var(--accent2); background: color-mix(in srgb, var(--accent2) 12%, transparent); border-color: transparent; }
+.tbl button.resume { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); margin-right: 4px; }
+.status .resume-big { width: auto; margin-top: 10px; padding: 9px 18px; }

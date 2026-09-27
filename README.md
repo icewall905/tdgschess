@@ -78,6 +78,15 @@ cp .env.example .env              # first time: set your endpoints / key
 docker compose up -d --build     # after editing app/ or .env
 ```
 
+Live games with a human that nobody has looked at for `HIBERNATE_AFTER` seconds (default 3600) are saved as
+"hibernated" and stopped; so are all running games when the server shuts down. They show a ▶ Resume button
+(Games list and game page) that rebuilds the game at the same position, with the original devices' seats.
+
+Chat lines are "chess-smart": LLM players and the engines' LLM commentator get Chat facts from Stockfish — the
+opening name (Lichess CC0 opening list, `app/data/openings.tsv`), the engine's verdict on the opponent's last
+move and how to punish it, the evaluation, Stockfish's plan and threats — and are told to use one real idea
+while staying in character. The teacher's overview includes the opening name too.
+
 Stockfish processes (each game's opponent, and the shared eval-bar, LLM-hint and teacher engines) start on
 demand and shut down after `ENGINE_IDLE` seconds (default 300) without use, so games waiting for a human don't
 hold memory; the next move restarts them. The container is limited to 3 GB.
