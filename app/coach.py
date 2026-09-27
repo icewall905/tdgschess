@@ -84,7 +84,7 @@ class CoachEngine:
             try:
                 if self.engine is None:
                     _, self.engine = await chess.engine.popen_uci(main().STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 128})
+                    await self.engine.configure({"Threads": 2, "Hash": 32})
                 infos = await self.engine.analyse(board, chess.engine.Limit(time=seconds),
                                                   multipv=min(n, board.legal_moves.count()))
             except Exception:

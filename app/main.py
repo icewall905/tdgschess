@@ -258,7 +258,7 @@ class Analyzer:
             try:
                 if self.engine is None:
                     _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 128})
+                    await self.engine.configure({"Threads": 2, "Hash": 32})
                 info = await self.engine.analyse(board, chess.engine.Limit(time=0.25))
             except Exception:
                 self.engine = None
@@ -290,7 +290,7 @@ class Advisor:
             try:
                 if self.engine is None:
                     _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 128})
+                    await self.engine.configure({"Threads": 2, "Hash": 32})
                 infos = await self.engine.analyse(board, chess.engine.Limit(depth=depth),
                                                   multipv=min(n, board.legal_moves.count()))
             except Exception:
@@ -850,7 +850,7 @@ class StockfishPlayer:
 
     async def start(self):
         _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-        opts = {"Threads": 2, "Hash": 64}
+        opts = {"Threads": 2, "Hash": 32}
         if self.spec.elo >= 1320 and not self.spec.auto:
             opts.update(UCI_LimitStrength=True, UCI_Elo=min(3190, self.spec.elo))
         await self.engine.configure(opts)
