@@ -41,7 +41,7 @@ GAMES_DIR = DATA_DIR / "games"
 GAMES_DIR.mkdir(parents=True, exist_ok=True)
 MAX_PLIES = int(os.environ.get("MAX_PLIES", "400"))
 PROFILES_FILE = DATA_DIR / "profiles.json"
-START_RATING = 1000
+START_RATING = 600
 AUTO_BELOW = 100  # auto Stockfish plays this many Elo below its human opponent: a bit weaker, still a challenge
 
 # ---------------------------------------------------------------- profiles

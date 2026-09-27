@@ -26,7 +26,7 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
 - Engine chat: Stockfish can have "Chat comments by an LLM" — after each engine move an LLM (endpoint +
   model + optional character) writes a kid-friendly chat line from move facts, material and the eval bar's
   score. It runs in the background, so the engine never waits for it; the comment appears when it arrives.
-- Players (👪): profiles with an emoji and a rating (start 1000, stored in `data/profiles.json`). After each
+- Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).
   Guests are unrated. LLM models are rated the same way (`data/llm_ratings.json`, new models start at 600),

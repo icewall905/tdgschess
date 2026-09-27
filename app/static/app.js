@@ -861,7 +861,7 @@ function sparkline(hist) {
 }
 
 function profileForm(p) {
-  const f = { name: p?.name || "", emoji: p?.emoji || EMOJIS[profiles.length % EMOJIS.length], rating: p?.rating || 1000 };
+  const f = { name: p?.name || "", emoji: p?.emoji || EMOJIS[profiles.length % EMOJIS.length], rating: p?.rating || 600 };
   const emo = h("div", { class: "emoji-pick" });
   const drawEmo = () => emo.replaceChildren(...EMOJIS.map((e) => h("button", { type: "button", class: e === f.emoji ? "active" : "", onclick: () => { f.emoji = e; drawEmo(); } }, e)));
   drawEmo();
