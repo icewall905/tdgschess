@@ -101,7 +101,7 @@ class PlayerSpec(BaseModel):
     elo: int = 0  # stockfish: 0 = full strength, else 1320..3190
     auto: bool = False  # stockfish: play a bit below the opponent's rating, easing off when far ahead
     movetime: float = 0.5  # seconds per move
-    nodes: int = 0  # lc0: 0 = use movetime
+    nodes: int = 0  # lc0: legacy (old games); Lc0 now always searches for `movetime`
     _seat: Optional[str] = PrivateAttr(default=None)  # client id of the device playing this human side
 
     def label(self) -> str:
@@ -114,7 +114,7 @@ class PlayerSpec(BaseModel):
                 return "Stockfish (auto)"
             return f"Stockfish ({self.elo} Elo)" if self.elo else "Stockfish (full)"
         if self.type == "lc0":
-            return f"Lc0 ({self.nodes} nodes)" if self.nodes else f"Lc0 ({self.movetime}s)"
+            return f"Lc0 ({self.nodes} nodes)" if self.nodes else f"Lc0 ({self.movetime:g}s)"
         return "Human"
 
 
@@ -178,7 +178,7 @@ ANALYZER = Analyzer()
 
 
 class Lc0Pool:
-    """One shared lc0 connection for all games: each lc0 process holds ~1.4 GB of VRAM next to the
+    """One shared lc0 connection for all games: each lc0 process holds ~1.3 GB of VRAM next to the
     LLM, so parallel games queue on the lock instead of spawning more. Closed after LC0_IDLE seconds."""
 
     def __init__(self):
@@ -675,6 +675,7 @@ class StockfishPlayer:
 class Lc0Player:
     def __init__(self, spec: PlayerSpec, color: bool, game: "Game"):
         self.spec, self.color, self.game = spec, color, game
+        spec.nodes = 0
 
     async def start(self):
         if not LC0_UCI_TCP:
@@ -684,7 +685,7 @@ class Lc0Player:
         pass
 
     async def choose(self, board: chess.Board) -> chess.Move:
-        limit = chess.engine.Limit(nodes=self.spec.nodes) if self.spec.nodes else chess.engine.Limit(time=self.spec.movetime)
+        limit = chess.engine.Limit(time=self.spec.movetime)  # full strength: as many nodes as the time allows
         t0 = time.time()
         mv = await LC0.play(board, limit, self.game.id)
         self.game.stats["white" if self.color else "black"]["seconds"] += time.time() - t0

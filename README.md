@@ -50,9 +50,13 @@ docker compose up -d --build     # after editing app/ or .env
 ```
 
 Autostart (systemd): `docker-compose-chess-arena.service` and `docker-compose-lc0.service`. TabbyAPI
-autostarts via its own docker restart policy (whatever stack `switch-llm.sh` left up). Lc0 (small
-`t1-256x10` net, ~1.4 GB VRAM) waits for the active LLM stack's GPU container to be healthy
+autostarts via its own docker restart policy (whatever stack `switch-llm.sh` left up). Lc0 waits for the active LLM stack's GPU container to be healthy
 (`../lc0/chess-engine/wait-llm-healthy.sh`); its container has `restart: "no"` so dockerd can't start it first.
+
+Lc0 runs the BT4-1024x15 net (`--backend-opts=max_batch=128 --minibatch-size=128`, ~1.3 GB VRAM, ~4k nps on
+the 3090) and only takes a time per move — it always plays full strength. Benchmarks next to TabbyAPI:
+t1-256x10 with minibatch 16: 15k nps; auto minibatch: 33k nps; t1-512x15: 13.6k nps, 1.5 GB; BT4 without
+`max_batch`: out of memory.
 
 Only one lc0 process ever runs: the engine side's socat doesn't fork, and the app shares one lc0
 connection between all games (moves queue on a lock; parallel Lc0 games and Lc0 vs Lc0 are fine).

@@ -57,7 +57,7 @@ const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
   llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
   stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5 },
-  lc0: { type: "lc0", nodes: 800, movetime: 1 },
+  lc0: { type: "lc0", nodes: 0, movetime: 3 },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
 
@@ -157,9 +157,9 @@ function renderSide(side) {
       h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.1", min: "0.05", value: s.movetime, oninput: upd("movetime", num) })),
     );
   } else if (s.type === "lc0") {
-    box.append(h("div", { class: "grid2" },
-      h("label", {}, "Nodes (0 = use time)", h("input", { type: "number", min: "0", value: s.nodes, oninput: upd("nodes", num) })),
-      h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.1", value: s.movetime, oninput: upd("movetime", num) }))));
+    s.nodes = 0;
+    box.append(h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.5", min: "0.5", value: s.movetime, oninput: upd("movetime", num) })),
+      h("div", { class: "hint" }, "Lc0 always plays at full strength; more time = stronger."));
   }
 }
 
