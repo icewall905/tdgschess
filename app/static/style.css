@@ -318,3 +318,76 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
   .player-bar .meta { display: none; }
 }
 .tbl .small { font-size: 11.5px; font-weight: 600; }
+
+/* ------------------------------------------------------------ profiles, join, network play */
+.hint { font-size: 12px; color: var(--muted); background: var(--bg2); border-radius: 10px; padding: 6px 9px; margin: 6px 0 2px; }
+.seg.full { display: flex; width: 100%; border-radius: 12px; }
+.seg.full button { flex: 1; border-radius: 9px; font-size: 12.5px; padding: 6px 4px; }
+.av.emoji { font-size: 20px; line-height: 1; background: var(--card2); border-color: var(--line2); }
+.av.emoji.white { box-shadow: 0 0 0 2px #fff, 0 0 0 3px var(--line2); }
+.av.emoji.black { box-shadow: 0 0 0 2px #3b3a44, 0 0 0 3px var(--line2); background: var(--card2); }
+.chat .msg .av.emoji { font-size: 18px; }
+
+.join-btn { border-radius: 999px; padding: 7px 14px; background: linear-gradient(135deg, var(--accent), var(--accent2)); color: #fff; border: none; box-shadow: 0 4px 12px color-mix(in srgb, var(--accent) 30%, transparent); }
+.join-btn:hover { filter: brightness(1.07); }
+.live-strip { display: flex; gap: 8px; flex-wrap: wrap; padding: 10px 20px 0; }
+.live-strip[hidden] { display: none; }
+.live-strip button { border-radius: 999px; font-size: 13px; background: var(--card); box-shadow: var(--shadow); }
+.live-strip .strip-join { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); animation: pulse 2s infinite; }
+.live-strip .strip-join b { margin-left: 8px; color: #fff; background: var(--good); border-radius: 999px; padding: 1px 10px; }
+@keyframes pulse { 50% { box-shadow: 0 0 0 5px color-mix(in srgb, var(--good) 18%, transparent), var(--shadow); } }
+
+.join-box { background: var(--card); border-radius: var(--radius); box-shadow: var(--shadow-lg); padding: 18px; width: min(520px, 94vw); max-height: 92vh; overflow-y: auto; }
+.join-step { font-weight: 800; margin: 14px 0 8px; }
+.who-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 8px; }
+.who-grid button { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 4px; border-radius: 14px; font-size: 13px; }
+.who-grid button b { font-size: 30px; line-height: 1.1; }
+.who-grid button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--card)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+.who-grid .guest { grid-column: 1 / -1; }
+.open-list { display: grid; gap: 8px; }
+.open-game { display: flex; align-items: center; gap: 12px; text-align: left; padding: 12px 14px; border-radius: 14px; background: var(--card2); }
+.open-game .pc { font-size: 24px; }
+.open-game small { display: block; color: var(--muted); font-weight: 600; }
+.open-game .go { margin-left: auto; color: var(--good); font-weight: 800; }
+.open-game:hover { border-color: var(--good); }
+.empty-list { font-size: 13px; padding: 10px; text-align: center; background: var(--card2); border-radius: 12px; }
+.join-code { display: flex; align-items: center; gap: 8px; margin-top: 14px; color: var(--muted); font-weight: 700; font-size: 13px; }
+.join-code input { width: 110px; font-size: 22px; font-weight: 800; letter-spacing: 6px; text-align: center; padding: 6px; }
+.join-code .primary { width: auto; margin: 0; padding: 10px 18px; }
+
+.status.code { text-align: center; }
+.status .code-digits { display: block; font-size: 44px; font-weight: 800; letter-spacing: 12px; margin: 2px 0 4px 12px;
+  background: linear-gradient(135deg, var(--accent), var(--accent2)); -webkit-background-clip: text; background-clip: text; color: transparent; }
+
+.react { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); margin-top: 6px; }
+.react[hidden] { display: none; }
+.react .emojis { display: flex; gap: 4px; flex-wrap: wrap; }
+.react .emojis button { font-size: 20px; padding: 3px 8px; border-radius: 12px; background: var(--card2); }
+.react .emojis button:hover { transform: scale(1.12); }
+.react form { display: flex; gap: 6px; }
+.chat .msg.human .bubble { border: 2px solid color-mix(in srgb, var(--t-human) 40%, transparent); }
+.chat .note.rating { font-weight: 800; font-size: 13px; }
+.chat .note.rating.up { color: var(--good); } .chat .note.rating.down { color: var(--bad); }
+
+.profiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 14px; }
+.profile-card { background: var(--card2); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px; display: flex; flex-direction: column; gap: 10px; }
+.profile-card .top { display: flex; align-items: center; gap: 12px; }
+.profile-card .big-emoji { font-size: 40px; width: 58px; height: 58px; display: grid; place-items: center; background: var(--card); border-radius: 50%; box-shadow: var(--shadow); flex: none; }
+.profile-card .pname { font-weight: 800; font-size: 18px; }
+.profile-card .prating { margin-left: auto; text-align: right; font-weight: 800; font-size: 20px; color: var(--accent); }
+.profile-card .prating small { display: block; font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
+.profile-card .row { display: flex; gap: 6px; }
+.profile-card .row .primary { width: auto; margin: 0; padding: 7px 14px; font-size: 13px; }
+.profile-card.add { align-items: center; justify-content: center; min-height: 150px; border-style: dashed; color: var(--muted); font-size: 15px; box-shadow: none; }
+.profile-card.add span { font-size: 34px; color: var(--accent); }
+.profile-card.editing { border-color: var(--accent); }
+.spark { height: 50px; background: var(--card); border-radius: 10px; padding: 4px; }
+.spark svg { width: 100%; height: 100%; display: block; }
+.spark.empty { display: grid; place-items: center; color: var(--muted); font-size: 12px; font-weight: 700; }
+.emoji-pick { display: flex; flex-wrap: wrap; gap: 4px; }
+.emoji-pick button { font-size: 20px; padding: 2px 6px; border-radius: 10px; background: var(--card); }
+.emoji-pick button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
+@media (max-width: 640px) { .join-btn { padding: 6px 10px; font-size: 13px; } .live-strip { padding: 8px 12px 0; } }
+.profile-card .stats { font-size: 12px; font-weight: 600; white-space: nowrap; }
+.profile-card .top > div:nth-child(2) { min-width: 0; flex: 1; }
+.profile-card .prating { flex: none; font-size: 18px; padding-right: 2px; }

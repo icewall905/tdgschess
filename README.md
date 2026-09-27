@@ -25,6 +25,21 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   `{"chat_template_kwargs": {"enable_thinking": false}}` to turn off reasoning on llama.cpp/Qwen.
 - Lc0: talks UCI over TCP to `../lc0/chess-engine` (socat, e.g. `LC0_UCI_TCP=lc0-host:4001`).
   That container must be running to use it.
+- Players (👪): profiles with an emoji and a rating (start 1000, stored in `data/profiles.json`). After each
+  finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
+  strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game), Lc0 = 3000.
+  LLMs and guests are unrated, so games against them don't change ratings.
+- Auto Stockfish (default): plays `AUTO_BELOW` (100) Elo under its human opponent's rating and eases off
+  mid-game when far ahead (up to −350 Elo at +7.5 pawns). At ≥1320 it uses Stockfish's own `UCI_Elo`; below
+  that it samples among its top 8 moves with a softmax whose temperature grows as the rating drops, and
+  searches shallower. The mapping is calibrated by engine-vs-engine matches against `UCI_Elo` 1320.
+  Against LLMs/engines auto uses the slider value. Lc0 always plays full strength.
+- Network play: set a human side to "📱 Another device". The game gets a 4-digit code; the other device taps
+  🔑 Join, picks who they are, and taps the game (games waiting for a player are listed automatically and
+  shown in a banner) or types the code. Each browser has a client id, so only the device holding a seat can
+  move/resign for it, and reopening the page on that device rejoins. The host can "🔓 Free seat" if the kid
+  switches devices. Game pages long-poll, so moves show on the other device instantly. Players can send emoji
+  reactions and short messages in the chat. Home network only — there is no login.
 - Matches: "Games" > 1 plays a series, alternating colours; results aggregate in Standings.
 - Finished games are saved as JSON (incl. PGN + full model log) in `./data/games/`.
   Games still running are lost if the container restarts.

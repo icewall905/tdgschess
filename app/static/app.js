@@ -12,7 +12,7 @@ const h = (tag, attrs = {}, ...kids) => {
   return el;
 };
 const api = async (path, opts = {}) => {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json" }, ...opts });
+  const r = await fetch(path, { headers: { "Content-Type": "application/json", "X-Client-Id": CID }, ...opts });
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 };
@@ -21,9 +21,24 @@ const store = {
   set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} },
 };
 
+// one id per browser: it owns the human seats this device plays (network games)
+const CID = (() => {
+  let c = store.get("cid", null);
+  if (!c) { c = crypto.randomUUID?.() || `${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`; store.set("cid", c); }
+  return c;
+})();
+let profiles = [];
+const profileById = (id) => profiles.find((p) => p.id === id);
+async function loadProfiles() { try { profiles = await api("/api/profiles"); } catch {} }
+
 const FILES = "abcdefgh";
 const VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
 const avatar = (side) => h("span", { class: `av ${side}` }, h("img", { src: pieceImg(side === "white" ? "K" : "k"), alt: "" }));
+// players with a profile show their emoji instead of the king
+const playerAvatar = (side, p) => {
+  const emoji = p?.profile && (profileById(p.profile)?.emoji);
+  return emoji ? h("span", { class: `av emoji ${side}` }, emoji) : avatar(side);
+};
 const TYPES = { human: ["🧒", "Human"], llm: ["🤖", "LLM"], stockfish: ["🐟", "Stockfish"], lc0: ["🦁", "Lc0"] };
 const pieceImg = (p) => `/static/pieces/${p === p.toUpperCase() ? "w" : "b"}${p.toUpperCase()}.svg`;
 
@@ -34,15 +49,14 @@ let viewPly = null;       // null = follow live
 let orientation = "white";
 let manualFlip = false;
 let selected = null;
-let polling = false;
 let animFrom = null;
 let skipAnim = false;     // human dropped the piece by drag, it is already on the target square      // {id, ply} shown before the next render; animate if it advances by one
 
 // ------------------------------------------------------------ setup form
 const DEFAULTS = {
-  human: { type: "human" },
+  human: { type: "human", profile: null, remote: false },
   llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
-  stockfish: { type: "stockfish", elo: 1500, movetime: 0.5 },
+  stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5 },
   lc0: { type: "lc0", nodes: 800, movetime: 1 },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
@@ -114,9 +128,27 @@ function renderSide(side) {
         }, Object.keys(s.extra || {}).length ? JSON.stringify(s.extra) : ""))),
     );
   } else if (s.type === "human") {
-    box.append(h("label", {}, "Your name", h("input", { value: s.name || "", placeholder: "e.g. Emma", maxlength: "40", oninput: upd("name") })));
+    if (s.profile && !profileById(s.profile)) s.profile = null;
+    const sel = h("select", {
+      onchange: (e) => { s.profile = e.target.value || null; store.set("setup", setup); renderSide(side); },
+    }, h("option", { value: "", selected: !s.profile }, "🙂 Guest"),
+      ...profiles.map((p) => h("option", { value: p.id, selected: s.profile === p.id }, `${p.emoji} ${p.name} · ⭐ ${p.rating}`)));
+    box.append(h("label", {}, s.remote ? "Who's playing? (they can pick when joining)" : "Who's playing?", sel));
+    if (!s.profile) box.append(h("label", {}, "Name", h("input", { value: s.name || "", placeholder: "e.g. Emma", maxlength: "40", oninput: upd("name") })));
+    const where = (remote, label) => h("button", {
+      type: "button", class: !!s.remote === remote ? "active" : "",
+      onclick: () => { s.remote = remote; store.set("setup", setup); renderSide(side); },
+    }, label);
+    box.append(h("label", {}, "Plays on"), h("div", { class: "seg full" }, where(false, "💻 This device"), where(true, "📱 Another device")));
+    if (s.remote) box.append(h("div", { class: "hint" }, "You'll get a 4-digit code. On the other phone or laptop open this page and tap 🔑 Join."));
   } else if (s.type === "stockfish") {
+    if (s.auto === undefined) { s.auto = true; store.set("setup", setup); }  // setups saved before auto existed
     const lbl = h("span", {}, s.elo ? `${s.elo} Elo` : "full strength");
+    box.append(
+      h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.auto ?? false, onchange: (e) => { s.auto = e.target.checked; store.set("setup", setup); renderSide(side); } }),
+        "Auto strength"),
+      s.auto ? h("div", { class: "hint" }, `Plays a bit below the human's rating and eases off when far ahead. The slider is only used against LLMs/engines.`) : null,
+    );
     box.append(
       h("label", {}, "Strength: ", lbl, h("input", {
         type: "range", min: "1300", max: "3200", step: "50", value: s.elo || 3200,
@@ -422,6 +454,13 @@ function sound(kind) {
   } catch {}
 }
 
+function thinkingText(p, side) {
+  const secs = Math.round(game.thinking_for + (performance.now() - (game._recv || performance.now())) / 1000);
+  if (p.type !== "human") return `thinking ${secs}s`;
+  if (game.open_seats?.includes(side)) return "waiting to join…";
+  return game.my_sides?.includes(side) ? `your move · ${secs}s` : `thinking ${secs}s`;
+}
+
 function renderBars() {
   const sides = orientation === "white" ? ["black", "white"] : ["white", "black"];
   [["#bar-top", sides[0]], ["#bar-bottom", sides[1]]].forEach(([sel, side]) => {
@@ -443,16 +482,19 @@ function renderBars() {
       if (st.errors) meta.push(`${st.errors} errors`);
     }
     if (p.type !== "human" && st.seconds) meta.push(`${Math.round(st.seconds)}s total`);
+    if (p.type === "stockfish" && p.auto && game.engine_now?.[side]) meta.unshift(`≈ ${game.engine_now[side]} Elo`);
+    const rt = game.ratings?.[side];
+    if (rt) meta.unshift(rt.delta != null ? `⭐ ${rt.after} (${rt.delta >= 0 ? "+" : ""}${rt.delta})` : `⭐ ${rt.before}`);
     const markEls = NAGS.filter(([, sym]) => marks[sym]).map(([, sym, cls]) => h("span", { class: `nag ${cls}`, title: `${marks[sym]} ${cls}${marks[sym] > 1 ? "s" : ""}` }, `${marks[sym]}${sym}`));
     el.replaceChildren(...[
-      avatar(side),
+      playerAvatar(side, p),
       h("div", { class: "who" },
         h("div", { class: "row" }, h("span", { class: "name", title: p.label }, p.label), h("span", { class: `pill ${p.type}` }, `${TYPES[p.type]?.[0] || ""} ${TYPES[p.type]?.[1] || p.type}`)),
         h("div", { class: "row" },
           h("span", { class: "captured" }, ...caps.map((c, i) => h("img", { src: pieceImg(c), class: i && caps[i - 1] === c ? "same" : "", alt: c })),
             diff > 0 ? h("span", { class: "diff" }, `+${diff}`) : null),
           markEls.length ? h("span", { class: "marks" }, ...markEls) : null)),
-      toMove && game.thinking_for != null ? h("span", { class: "thinking" }, p.type === "human" ? `your move · ${Math.round(game.thinking_for)}s` : `thinking ${Math.round(game.thinking_for)}s`) : null,
+      toMove && game.thinking_for != null ? h("span", { class: "thinking" }, thinkingText(p, side)) : null,
       h("span", { class: "meta" }, meta.join(" · ")),
     ].filter((x) => x != null && x !== false));
   });
@@ -463,21 +505,28 @@ function renderStatus() {
   el.className = "status";
   if (!game) { el.replaceChildren(h("span", { class: "big" }, "👋 Welcome!"), h("span", { class: "sub" }, "Pick two players and press Start.")); return; }
   const match = game.opts?.games > 1 ? `Game ${game.index} of ${game.opts.games}` : "";
-  const line = (big, sub) => el.replaceChildren(h("span", { class: "big" }, big), sub ? h("span", { class: "sub" }, sub) : null);
+  const line = (big, sub) => el.replaceChildren(h("span", { class: "big" }, big), ...(sub ? [h("span", { class: "sub" }, sub)] : []));
   if (game.status === "finished") {
     const winner = game.result === "1-0" ? "white" : game.result === "0-1" ? "black" : null;
     el.classList.add("win");
     line(winner ? `🏆 ${game[winner].label} wins!` : "🤝 It's a draw!", [game.result, game.termination, match].filter(Boolean).join(" · "));
+  } else if (game.open_seats?.length && (game.status === "running" || game.status === "queued")) {
+    el.classList.add("live", "code");
+    const side = game.open_seats[0];
+    el.replaceChildren(h("span", { class: "sub" }, "Join code"), h("span", { class: "code-digits" }, game.code),
+      h("span", { class: "sub" }, `Waiting for ${side === "white" ? "⚪ White" : "⚫ Black"} — on the other device tap 🔑 Join`));
   } else if (game.status === "running") {
     el.classList.add("live");
     const p = game[game.turn];
     line(`${game.turn === "white" ? "⚪" : "⚫"} ${game.human_turn ? "Your move!" : `${p.label} to move`}${game.check ? " — check! ⚡" : ""}`,
-      [`Move ${Math.floor(game.san.length / 2) + 1}`, match].filter(Boolean).join(" · "));
+      [`Move ${Math.floor(game.san.length / 2) + 1}`, match, game.code ? `code ${game.code}` : ""].filter(Boolean).join(" · "));
   } else line(game.status === "queued" ? "⏳ Waiting to start" : `⏹ ${game.status}`,
     [game.termination && game.termination !== game.status ? game.termination : "", match].filter(Boolean).join(" · "));
   const live = game.status === "running" || game.status === "queued";
   $("#abort").hidden = !live;
   $("#resign").hidden = !(game.human_turn);
+  const taken = (game.remote_sides || []).filter((s) => !game.open_seats?.includes(s));
+  $("#free-seat").hidden = !(live && game.is_host && taken.length);
 }
 
 function renderMoves() {
@@ -516,7 +565,7 @@ function renderLog(force) {
   const sig = `${game.id}:${game.log.length}:${showR}`;
   if (sig === logSig && !force) return;
   logSig = sig;
-  el.replaceChildren(...game.log.map((e) => {
+  el.replaceChildren(...game.log.filter((e) => e.kind !== "chat").map((e) => {
     const moveNo = `${Math.floor(e.ply / 2) + 1}${e.side === "white" ? "." : "…"}`;
     return h("div", { class: `entry ${e.side}${e.error ? " error" : ""}` },
       h("div", { class: "h" },
@@ -558,9 +607,22 @@ function renderChat(force) {
   chatSig = sig;
   const says = {};
   for (const e of game.log) if (e.move) says[e.ply] = e.say || "";
+  const chats = game.log.map((e, i) => ({ ...e, i })).filter((e) => e.kind === "chat");
+  let ci = 0;
+  const bubble = (side, who, chip, text, cls = "") => h("div", { class: `msg ${side} ${cls}` }, playerAvatar(side, game[side]),
+    h("div", { class: "bubble" }, h("div", { class: "who" }, who, chip ? h("span", { class: "chip" }, chip) : null), h("div", { class: "txt" }, text)));
+  const pushChats = (upto) => {
+    while (ci < chats.length && chats[ci].ply <= upto) {
+      const e = chats[ci++];
+      const key = `${game.id}:c${e.i}`;
+      if (!spoken.has(key)) { spoken.add(key); if (!firstLoad) speak(e.say, e.side); }
+      items.push(bubble(e.side, game[e.side].label, null, e.say, "human"));
+    }
+  };
   const cur = shownPly();
   const items = [h("div", { class: "note start" }, `🎉 Game on!  ${game.white.label} (White) vs ${game.black.label} (Black)`)];
   game.san.forEach((san, ply) => {
+    pushChats(ply);
     const side = moverSide(ply);
     const p = game[side];
     const key = `${game.id}:${ply}`;
@@ -569,7 +631,7 @@ function renderChat(force) {
     if (says[ply]) {
       if (!spoken.has(key)) { spoken.add(key); if (!firstLoad) speak(says[ply], side); }
       items.push(h("div", { class: `msg ${side}${ply + 1 === cur ? " cur" : ""}`, onclick },
-        avatar(side),
+        playerAvatar(side, p),
         h("div", { class: "bubble" },
           h("div", { class: "who" }, p.name || p.model || p.label, h("span", { class: "chip" }, `${moveNo} ${san}`)),
           h("div", { class: "txt" }, says[ply]))));
@@ -579,18 +641,44 @@ function renderChat(force) {
         `${p.type === "human" ? p.name || "You" : p.label} played ${moveNo} ${san}`));
     }
   });
+  pushChats(Infinity);
   if (toMove) {
     const p = game[toMove];
     if (p.type !== "human") items.push(h("div", { class: `msg ${toMove} typing` },
-      avatar(toMove),
+      playerAvatar(toMove, p),
       h("div", { class: "bubble" }, h("div", { class: "who" }, p.name || p.model || p.label),
         h("div", { class: "dots" }, h("i"), h("i"), h("i")))));
   }
-  if (game.status === "finished") items.push(h("div", { class: "note end" }, `🏁 ${game.result} — ${game.termination}`));
+  if (game.status === "finished") {
+    items.push(h("div", { class: "note end" }, `🏁 ${game.result} — ${game.termination}`));
+    for (const [side, r] of Object.entries(game.ratings || {})) if (r.delta != null)
+      items.push(h("div", { class: `note rating ${r.delta >= 0 ? "up" : "down"}` }, `${game[side].label}: ⭐ ${r.before} → ${r.after} (${r.delta >= 0 ? "+" : ""}${r.delta})`));
+  }
   else if (game.status !== "running" && game.status !== "queued") items.push(h("div", { class: "note end" }, game.termination || game.status));
+  renderReact();
   const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.replaceChildren(...items);
   if (atBottom || firstLoad) el.scrollTop = el.scrollHeight;
+}
+
+const REACTIONS = ["👏", "😮", "😂", "🤔", "👍", "❤️", "😱", "🎉"];
+let reactSig = "";
+function renderReact() {
+  const el = $("#react");
+  const mine = game?.my_sides?.length && game.status !== "aborted" && game.status !== "error";
+  const show = !!mine && store.get("infoTab", "chat") === "chat";
+  el.hidden = !show;
+  if (!show) { reactSig = ""; return; }
+  if (reactSig === game.id) return;  // keep the text box as the user types
+  reactSig = game.id;
+  const say = async (text) => {
+    if (!text.trim()) return;
+    try { await api(`/api/games/${game.id}/say`, { method: "POST", body: JSON.stringify({ text }) }); } catch (e) { alert(e.message); }
+  };
+  const input = h("input", { placeholder: "Say something…", maxlength: "140" });
+  el.replaceChildren(
+    h("div", { class: "emojis" }, ...REACTIONS.map((r) => h("button", { type: "button", onclick: () => say(r) }, r))),
+    h("form", { onsubmit: (e) => { e.preventDefault(); say(input.value); input.value = ""; } }, input, h("button", { type: "submit" }, "Send")));
 }
 
 function setTab(tab) {
@@ -598,6 +686,7 @@ function setTab(tab) {
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   $$(".tabs label[data-for]").forEach((l) => { l.hidden = l.dataset.for !== tab; });
   $("#chat").hidden = tab !== "chat";
+  if (game) renderReact();
   $("#log").hidden = tab !== "log";
   if (tab === "chat") renderChat(true); else renderLog(true);
 }
@@ -622,7 +711,8 @@ function setView(ply) {
 
 function autoOrient() {
   if (manualFlip || !game) return;
-  orientation = game.black.type === "human" && game.white.type !== "human" ? "black" : "white";
+  if (game.my_sides?.length === 1) orientation = game.my_sides[0];
+  else orientation = game.black.type === "human" && game.white.type !== "human" ? "black" : "white";
 }
 
 async function openGame(id) {
@@ -637,11 +727,16 @@ async function poll(force = false) {
   if (!currentId) { renderAll(); return; }
   try {
     const since = !force && game && game.id === currentId ? game.version : -1;
+    const want = currentId;
     const s = await api(`/api/games/${currentId}?since=${since}`);
-    if (s.unchanged) return;
+    if (s.unchanged || want !== currentId || (!s.unchanged && s.id !== currentId)) return;
     const first = !game || game.id !== s.id;
     const prev = first ? null : game;
+    if (!first && s.version < prev.version) return;  // an older long-poll answer arriving late
+    s._recv = performance.now();
     game = s;
+    if (prev && !prev.human_turn && game.human_turn && game.my_sides?.length) navigator.vibrate?.(120);
+    if (prev && prev.open_seats?.length && !game.open_seats?.length) sound("check");
     if (prev && viewPly == null && game.san.length === prev.san.length + 1) {
       if (!skipAnim) animFrom = { id: game.id, ply: prev.san.length };
       const san = game.san[game.san.length - 1];
@@ -670,13 +765,13 @@ async function maybeFollowMatch() {
   }, 4000);
 }
 
+// the server holds the request until the game changes (long poll), so moves from other devices appear instantly
 async function loop() {
-  if (!polling) {
-    polling = true;
-    try { await poll(); } finally { polling = false; }
-  }
-  setTimeout(loop, 1000);
+  await poll();
+  const live = game && (game.status === "running" || game.status === "queued");
+  setTimeout(loop, live ? 30 : 1500);
 }
+setInterval(() => { if (game?.thinking_for != null && game.status === "running") renderBars(); }, 1000);
 
 // ------------------------------------------------------------ lists
 const fmtTime = (t) => new Date(t * 1000).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
@@ -701,13 +796,14 @@ async function renderGames() {
 async function renderStandings() {
   const rows = await api("/api/standings");
   const t = $("#standings-table");
-  t.replaceChildren(h("tr", {}, ...["#", "Player", "Type", "Games", "W", "D", "L", "Score %", "Illegal", "Random"].map((x) => h("th", {}, x))),
+  t.replaceChildren(h("tr", {}, ...["#", "Player", "Type", "Rating", "Games", "W", "D", "L", "Score %", "Illegal", "Random"].map((x) => h("th", {}, x))),
     ...rows.map((r, i) => h("tr", {},
-      h("td", { class: "medal" }, ["🥇", "🥈", "🥉"][i] || i + 1), h("td", {}, h("b", {}, r.label), r.settings ? h("div", { class: "muted small" }, r.settings) : null),
+      h("td", { class: "medal" }, ["🥇", "🥈", "🥉"][i] || i + 1), h("td", {}, h("b", {}, r.emoji ? `${r.emoji} ${r.label}` : r.label), r.settings ? h("div", { class: "muted small" }, r.settings) : null),
       h("td", {}, h("span", { class: `pill ${r.type}` }, `${TYPES[r.type]?.[0] || ""} ${TYPES[r.type]?.[1] || r.type}`)),
+      h("td", {}, r.rating != null ? h("b", {}, `⭐ ${r.rating}`) : ""),
       h("td", {}, r.games), h("td", {}, r.w), h("td", {}, r.d), h("td", {}, r.l),
       h("td", {}, h("b", {}, r.score), h("span", { class: "bar" }, h("i", { style: `width:${r.score}%` }))), h("td", {}, r.illegal), h("td", {}, r.random_moves))));
-  if (!rows.length) t.append(h("tr", {}, h("td", { class: "muted", colspan: 10 }, "No finished games yet.")));
+  if (!rows.length) t.append(h("tr", {}, h("td", { class: "muted", colspan: 11 }, "No finished games yet.")));
 }
 
 function showView(v) {
@@ -715,9 +811,135 @@ function showView(v) {
   $$(".view").forEach((s) => s.classList.toggle("active", s.id === `view-${v}`));
   if (v === "games") renderGames();
   if (v === "standings") renderStandings();
+  if (v === "players") renderProfiles();
+}
+
+// ------------------------------------------------------------ players (profiles)
+const EMOJIS = ["🧔", "👩", "🌸", "🌟", "🦄", "🐼", "🦊", "🐯", "🐸", "🐱", "🐶", "🦖", "🚀", "⚽", "🎨", "👑", "🐙", "🦋"];
+let editing = null;
+
+function sparkline(hist) {
+  const pts = hist.map((x) => x.rating);
+  if (pts.length < 2) return h("div", { class: "spark empty" }, "no games yet");
+  const lo = Math.min(...pts) - 10, hi = Math.max(...pts) + 10;
+  const xy = pts.map((v, i) => `${(i / (pts.length - 1)) * 200},${50 - ((v - lo) / (hi - lo)) * 46 - 2}`).join(" ");
+  const el = h("div", { class: "spark" });
+  el.innerHTML = `<svg viewBox="0 0 200 50" preserveAspectRatio="none"><polyline points="${xy}" fill="none" stroke-width="2.5" vector-effect="non-scaling-stroke" style="stroke:var(--accent)"/></svg>`;
+  return el;
+}
+
+function profileForm(p) {
+  const f = { name: p?.name || "", emoji: p?.emoji || EMOJIS[profiles.length % EMOJIS.length], rating: p?.rating || 1000 };
+  const emo = h("div", { class: "emoji-pick" });
+  const drawEmo = () => emo.replaceChildren(...EMOJIS.map((e) => h("button", { type: "button", class: e === f.emoji ? "active" : "", onclick: () => { f.emoji = e; drawEmo(); } }, e)));
+  drawEmo();
+  const save = async () => {
+    try {
+      if (p) await api(`/api/profiles/${p.id}`, { method: "PATCH", body: JSON.stringify(f) });
+      else await api("/api/profiles", { method: "POST", body: JSON.stringify(f) });
+      editing = null; await loadProfiles(); renderProfiles(); renderSetup();
+    } catch (e) { alert(e.message); }
+  };
+  return h("div", { class: "profile-card editing" },
+    h("label", {}, "Name", h("input", { value: f.name, maxlength: "40", oninput: (e) => (f.name = e.target.value) })),
+    h("label", {}, "Picture"), emo,
+    h("label", {}, "Rating", h("input", { type: "number", min: "100", max: "3000", step: "10", value: f.rating, oninput: (e) => (f.rating = Number(e.target.value)) })),
+    h("div", { class: "row" }, h("button", { class: "primary", type: "button", onclick: save }, p ? "Save" : "Add player"),
+      h("button", { type: "button", onclick: () => { editing = null; renderProfiles(); } }, "Cancel")));
+}
+
+async function renderProfiles() {
+  await loadProfiles();
+  const el = $("#profiles");
+  el.replaceChildren(...profiles.map((p) => editing === p.id ? profileForm(p) : h("div", { class: "profile-card" },
+    h("div", { class: "top" }, h("span", { class: "big-emoji" }, p.emoji),
+      h("div", {}, h("div", { class: "pname" }, p.name), h("div", { class: "muted stats" }, `${p.games} game${p.games === 1 ? "" : "s"}`), h("div", { class: "muted stats" }, `${p.w} won · ${p.d} drawn · ${p.l} lost`)),
+      h("div", { class: "prating" }, h("small", {}, "rating"), `⭐ ${p.rating}`)),
+    sparkline(p.history || []),
+    h("div", { class: "row" },
+      h("button", { type: "button", onclick: () => { editing = p.id; renderProfiles(); } }, "✏️ Edit"),
+      h("button", { type: "button", class: "danger", onclick: async () => {
+        if (!confirm(`Delete ${p.name}? Their rating history is lost.`)) return;
+        await api(`/api/profiles/${p.id}`, { method: "DELETE" }); await loadProfiles(); renderProfiles(); renderSetup();
+      } }, "🗑")))),
+    editing === "new" ? profileForm(null) : h("button", { class: "profile-card add", type: "button", onclick: () => { editing = "new"; renderProfiles(); } }, h("span", {}, "＋"), "Add player"));
+}
+
+// ------------------------------------------------------------ join (network play)
+let joinTimer = null;
+let me = store.get("me", { profile: null, name: "" });
+
+function renderJoinWho() {
+  const pick = (profile) => { me = { ...me, profile }; store.set("me", me); renderJoinWho(); };
+  $("#join-who").replaceChildren(
+    ...profiles.map((p) => h("button", { type: "button", class: me.profile === p.id ? "active" : "", onclick: () => pick(p.id) },
+      h("b", {}, p.emoji), p.name)),
+    h("button", { type: "button", class: !me.profile ? "active" : "", onclick: () => pick(null) }, h("b", {}, "🙂"), "Guest"),
+    ...(!me.profile ? [h("input", { class: "guest", placeholder: "Your name", value: me.name || "", maxlength: "40",
+      oninput: (e) => { me.name = e.target.value; store.set("me", me); } })] : []));
+}
+
+async function refreshJoinList() {
+  let list = [];
+  try { list = await api("/api/open"); } catch {}
+  const el = $("#join-list");
+  el.replaceChildren(...(list.length ? list.map((g) => h("button", { type: "button", class: "open-game", onclick: () => doJoin(g.code) },
+    h("span", { class: "pc" }, g.side === "white" ? "⚪" : "⚫"),
+    h("span", {}, h("b", {}, `Play ${g.side === "white" ? "White" : "Black"} vs ${g.opponent}`), h("small", {}, `code ${g.code}${g.mine ? " · started here" : ""}`)),
+    h("span", { class: "go" }, "Join ▶"))) : [h("div", { class: "muted empty-list" }, "No games are waiting right now. Ask the other player to start one with 📱 Another device.")]));
+}
+
+async function doJoin(code) {
+  $("#join-err").textContent = "";
+  try {
+    const r = await api("/api/join", { method: "POST", body: JSON.stringify({ code, profile: me.profile, name: me.profile ? null : me.name }) });
+    closeJoin();
+    manualFlip = false;
+    openGame(r.id);
+  } catch (e) { $("#join-err").textContent = e.message; }
+}
+
+async function openJoin(code) {
+  await loadProfiles();
+  renderJoinWho();
+  $("#join-code").value = code || "";
+  $("#join-err").textContent = "";
+  $("#join-modal").hidden = false;
+  refreshJoinList();
+  clearInterval(joinTimer);
+  joinTimer = setInterval(refreshJoinList, 2000);
+}
+function closeJoin() { $("#join-modal").hidden = true; clearInterval(joinTimer); }
+
+// auto-detect: games waiting for a player, and running games to watch
+async function refreshLive() {
+  let open = [], games = [];
+  try { [open, games] = await Promise.all([api("/api/open"), api("/api/games")]); } catch { return; }
+  const el = $("#live-strip");
+  const waiting = open.filter((g) => !g.mine && g.id !== currentId);
+  const watch = games.filter((g) => g.status === "running" && g.id !== currentId && !open.some((o) => o.id === g.id)).slice(0, 4);
+  el.hidden = !waiting.length && !watch.length;
+  el.replaceChildren(
+    ...waiting.map((g) => h("button", { type: "button", class: "strip-join", onclick: () => openJoin(g.code) },
+      `🎲 ${g.opponent} is waiting for a player!`, h("b", {}, "Join"))),
+    ...watch.map((g) => h("button", { type: "button", class: "strip-watch", onclick: () => openGame(g.id) },
+      `👀 ${g.white.label} vs ${g.black.label}`)));
 }
 
 // ------------------------------------------------------------ wiring
+$("#join-open").onclick = () => openJoin();
+$("#join-close").onclick = closeJoin;
+$("#join-modal").addEventListener("click", (e) => { if (e.target.id === "join-modal") closeJoin(); });
+$("#join-go").onclick = () => doJoin($("#join-code").value.trim());
+$("#join-code").addEventListener("keydown", (e) => { if (e.key === "Enter") doJoin($("#join-code").value.trim()); });
+$("#free-seat").onclick = async () => {
+  if (!game) return;
+  const side = (game.remote_sides || []).find((s) => !game.open_seats?.includes(s));
+  if (side && confirm(`Let another device take the ${side} seat? The current device can join again with the code.`)) {
+    await api(`/api/games/${game.id}/free/${side}`, { method: "POST" }).catch((e) => alert(e.message));
+    poll(true);
+  }
+};
 $$("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dataset.view)));
 $$("[data-preset]").forEach((b) => b.addEventListener("click", () => applyPreset(b.dataset.preset)));
 $("#swap-sides").onclick = () => { setup = { white: setup.black, black: setup.white }; store.set("setup", setup); renderSetup(); };
@@ -788,6 +1010,7 @@ document.addEventListener("keydown", (e) => {
   if (store.get("setupCollapsed", false)) collapseSetup(true);
   setTab(store.get("infoTab", "chat"));
   try { config = await api("/api/config"); } catch {}
+  await loadProfiles();
   // fill in endpoint/model for stored LLM setups that have none
   for (const [i, side] of ["white", "black"].entries()) {
     if (setup[side].type === "llm" && !setup[side].model) Object.assign(setup[side], firstModel(i));
@@ -795,4 +1018,6 @@ document.addEventListener("keydown", (e) => {
   renderSetup();
   renderAll();
   loop();
+  refreshLive();
+  setInterval(refreshLive, 4000);
 })();

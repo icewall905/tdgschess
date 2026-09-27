@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import math
 import os
 import random
 import re
@@ -14,10 +15,10 @@ import chess
 import chess.engine
 import chess.pgn
 import httpx
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 # ---------------------------------------------------------------- config
 
@@ -41,12 +42,48 @@ DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 GAMES_DIR = DATA_DIR / "games"
 GAMES_DIR.mkdir(parents=True, exist_ok=True)
 MAX_PLIES = int(os.environ.get("MAX_PLIES", "400"))
+PROFILES_FILE = DATA_DIR / "profiles.json"
+START_RATING = 1000
+AUTO_BELOW = 100  # auto Stockfish plays this many Elo below its human opponent: a bit weaker, still a challenge
+
+# ---------------------------------------------------------------- profiles
+
+DEFAULT_PROFILES = [("Far", "🧔"), ("Mor", "👩"), ("Lily", "🌸"), ("Ria", "🌟")]
+
+
+def load_profiles() -> dict[str, dict]:
+    try:
+        return json.loads(PROFILES_FILE.read_text())
+    except FileNotFoundError:
+        out = {}
+        for name, emoji in DEFAULT_PROFILES:
+            pid = uuid.uuid4().hex[:8]
+            out[pid] = new_profile(pid, name, emoji, START_RATING)
+        return out
+
+
+def new_profile(pid: str, name: str, emoji: str, rating: int) -> dict:
+    return {"id": pid, "name": name, "emoji": emoji, "rating": rating, "games": 0, "w": 0, "d": 0, "l": 0,
+            "history": [{"t": time.time(), "rating": rating}], "created": time.time()}
+
+
+def save_profiles():
+    tmp = PROFILES_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(PROFILES, ensure_ascii=False))
+    tmp.replace(PROFILES_FILE)
+
+
+PROFILES = load_profiles()
+save_profiles()
 
 # ---------------------------------------------------------------- models
 
 class PlayerSpec(BaseModel):
     type: Literal["human", "llm", "stockfish", "lc0"]
     name: Optional[str] = None
+    # human
+    profile: Optional[str] = None  # profile id; its name and rating are used
+    remote: bool = False  # plays on another device, which joins with the game's code
     # llm
     endpoint: Optional[str] = None
     model: Optional[str] = None
@@ -62,8 +99,10 @@ class PlayerSpec(BaseModel):
     extra: dict = Field(default_factory=dict)  # merged into the chat request body
     # engines
     elo: int = 0  # stockfish: 0 = full strength, else 1320..3190
+    auto: bool = False  # stockfish: play a bit below the opponent's rating, easing off when far ahead
     movetime: float = 0.5  # seconds per move
     nodes: int = 0  # lc0: 0 = use movetime
+    _seat: Optional[str] = PrivateAttr(default=None)  # client id of the device playing this human side
 
     def label(self) -> str:
         if self.name:
@@ -71,6 +110,8 @@ class PlayerSpec(BaseModel):
         if self.type == "llm":
             return f"{self.model} @ {self.endpoint}"
         if self.type == "stockfish":
+            if self.auto:
+                return "Stockfish (auto)"
             return f"Stockfish ({self.elo} Elo)" if self.elo else "Stockfish (full)"
         if self.type == "lc0":
             return f"Lc0 ({self.nodes} nodes)" if self.nodes else f"Lc0 ({self.movetime}s)"
@@ -89,6 +130,22 @@ class NewGame(BaseModel):
 
 class HumanMove(BaseModel):
     uci: str
+
+
+class ProfileIn(BaseModel):
+    name: Optional[str] = None
+    emoji: Optional[str] = None
+    rating: Optional[int] = None
+
+
+class JoinReq(BaseModel):
+    code: str
+    profile: Optional[str] = None
+    name: Optional[str] = None  # guest name when no profile
+
+
+class SayReq(BaseModel):
+    text: str
 
 
 # ---------------------------------------------------------------- analysis
@@ -537,21 +594,42 @@ class LLMPlayer:
         return mv
 
 
-class EnginePlayer:
+# Measured by engine-vs-engine matches (40 games per pair, 0.1 s/move for UCI_Elo), chained down from
+# Stockfish's own UCI_Elo 1320: (Elo, softmax temperature in centipawns, search depth).
+WEAK_TABLE = [(1410, 100, 5), (1183, 125, 5), (950, 150, 4), (760, 200, 3), (600, 250, 2), (370, 350, 1), (290, 600, 1)]
+
+
+def weak_params(elo: float) -> tuple[float, int]:
+    """Below Stockfish's own UCI_Elo floor (1320): sample among its top moves with a softmax whose temperature
+    grows as the rating drops, searching shallower too. Interpolated from WEAK_TABLE; ~290 is the weakest."""
+    if elo >= WEAK_TABLE[0][0]:
+        return WEAK_TABLE[0][1], WEAK_TABLE[0][2]
+    for (e1, t1, d1), (e0, t0, d0) in zip(WEAK_TABLE, WEAK_TABLE[1:]):
+        if elo >= e0:
+            f = (elo - e0) / (e1 - e0)
+            return t0 + (t1 - t0) * f, round(d0 + (d1 - d0) * f)
+    return WEAK_TABLE[-1][1], WEAK_TABLE[-1][2]
+
+
+def soften(elo: float, advantage_cp: int) -> float:
+    """Mid-game softening: the further the engine is ahead, the more it eases off (up to 350 Elo)."""
+    if advantage_cp <= 150:
+        return elo
+    return elo - min(1.0, (advantage_cp - 150) / 600) * 350
+
+
+class StockfishPlayer:
     def __init__(self, spec: PlayerSpec, color: bool, game: "Game"):
         self.spec, self.color, self.game = spec, color, game
+        self.side = "white" if color else "black"
         self.engine = None
 
     async def start(self):
-        if self.spec.type == "stockfish":
-            _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-            opts = {"Threads": 2, "Hash": 64}
-            if self.spec.elo:
-                opts.update(UCI_LimitStrength=True, UCI_Elo=max(1320, min(3190, self.spec.elo)))
-            await self.engine.configure(opts)
-        else:
-            if not LC0_UCI_TCP:
-                raise ValueError("LC0_UCI_TCP not configured")
+        _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
+        opts = {"Threads": 2, "Hash": 64}
+        if self.spec.elo and not self.spec.auto:
+            opts.update(UCI_LimitStrength=True, UCI_Elo=max(1320, min(3190, self.spec.elo)))
+        await self.engine.configure(opts)
 
     async def close(self):
         if self.engine:
@@ -561,15 +639,55 @@ class EnginePlayer:
                 pass
 
     async def choose(self, board: chess.Board) -> chess.Move:
-        limit = (chess.engine.Limit(nodes=self.spec.nodes) if self.spec.type == "lc0" and self.spec.nodes
-                 else chess.engine.Limit(time=self.spec.movetime))
         t0 = time.time()
-        if self.spec.type == "lc0":
-            mv = await LC0.play(board, limit, self.game.id)
+        if self.spec.auto:
+            mv = await self.auto_move(board)
         else:
-            mv = (await self.engine.play(board, limit)).move
-        side = "white" if self.color else "black"
-        self.game.stats[side]["seconds"] += time.time() - t0
+            mv = (await self.engine.play(board, chess.engine.Limit(time=self.spec.movetime))).move
+        self.game.stats[self.side]["seconds"] += time.time() - t0
+        return mv
+
+    async def auto_move(self, board: chess.Board) -> chess.Move:
+        base = self.game.auto_target(self.color)
+        if base >= 3190:
+            self.game.note_engine_elo(self.side, 3190)
+            return (await self.engine.play(board, chess.engine.Limit(time=self.spec.movetime))).move
+        T, depth = weak_params(base)
+        multipv = min(8, board.legal_moves.count()) if base < 1320 else 1
+        infos = await self.engine.analyse(board, chess.engine.Limit(depth=max(depth, 2)), multipv=multipv)
+        cand = [(i["pv"][0], i["score"].pov(self.color).score(mate_score=10000)) for i in infos if i.get("pv")]
+        best = max(c for _, c in cand)
+        elo = max(200, soften(base, best))
+        self.game.note_engine_elo(self.side, elo)
+        if elo >= 1320:
+            limit = chess.engine.Limit(time=self.spec.movetime)
+            return (await self.engine.play(board, limit, options={"UCI_LimitStrength": True, "UCI_Elo": round(elo)})).move
+        if multipv == 1:  # softened below the UCI floor on this move: widen the search
+            infos = await self.engine.analyse(board, chess.engine.Limit(depth=weak_params(elo)[1]),
+                                              multipv=min(8, board.legal_moves.count()))
+            cand = [(i["pv"][0], i["score"].pov(self.color).score(mate_score=10000)) for i in infos if i.get("pv")]
+            best = max(c for _, c in cand)
+        T = weak_params(elo)[0]
+        cand = [(m, c) for m, c in cand if best - c <= max(200, 3 * T)]
+        return random.choices([m for m, _ in cand], [math.exp((c - best) / T) for _, c in cand])[0]
+
+
+class Lc0Player:
+    def __init__(self, spec: PlayerSpec, color: bool, game: "Game"):
+        self.spec, self.color, self.game = spec, color, game
+
+    async def start(self):
+        if not LC0_UCI_TCP:
+            raise ValueError("LC0_UCI_TCP not configured")
+
+    async def close(self):
+        pass
+
+    async def choose(self, board: chess.Board) -> chess.Move:
+        limit = chess.engine.Limit(nodes=self.spec.nodes) if self.spec.nodes else chess.engine.Limit(time=self.spec.movetime)
+        t0 = time.time()
+        mv = await LC0.play(board, limit, self.game.id)
+        self.game.stats["white" if self.color else "black"]["seconds"] += time.time() - t0
         return mv
 
 
@@ -593,7 +711,7 @@ class HumanPlayer:
 
 
 def make_player(spec: PlayerSpec, color: bool, game):
-    return {"human": HumanPlayer, "llm": LLMPlayer}.get(spec.type, EnginePlayer)(spec, color, game)
+    return {"human": HumanPlayer, "llm": LLMPlayer, "stockfish": StockfishPlayer, "lc0": Lc0Player}[spec.type](spec, color, game)
 
 
 # ---------------------------------------------------------------- game
@@ -618,10 +736,88 @@ class Game:
         self.awaiting_human = False
         self.created = time.time()
         self.version = 0
+        self.changed = asyncio.Event()
         self.task: Optional[asyncio.Task] = None
+        self.code: Optional[str] = None  # 4-digit join code, shared by the games of a match
+        self.host: Optional[str] = None  # client id of the device that created it
+        self.ratings: dict[str, dict] = {}  # side -> {"profile", "before", "after", "delta"}
+        self.engine_elo: dict[str, list[float]] = {"white": [], "black": []}
 
     def touch(self):
         self.version += 1
+        self.changed.set()
+        self.changed = asyncio.Event()
+
+    # ---- ratings / auto strength
+    def snapshot_rating(self, side: str):
+        spec = self.white if side == "white" else self.black
+        if spec.profile in PROFILES:
+            self.ratings[side] = {"profile": spec.profile, "before": PROFILES[spec.profile]["rating"]}
+        else:
+            self.ratings.pop(side, None)
+
+    def human_rating(self, side: str) -> Optional[float]:
+        spec = self.white if side == "white" else self.black
+        if side in self.ratings:
+            return self.ratings[side]["before"]
+        return START_RATING if spec.type == "human" else None
+
+    def auto_target(self, color: bool) -> float:
+        """Base strength for an auto Stockfish on `color`: a bit below a human opponent, else its slider."""
+        other = "black" if color else "white"
+        opp = self.spec_for(not color)
+        if opp.type == "human":
+            return max(200, self.human_rating(other) - AUTO_BELOW)
+        return self.spec_for(color).elo or 3190
+
+    def note_engine_elo(self, side: str, elo: float):
+        self.engine_elo[side].append(elo)
+
+    def opp_strength(self, side: str) -> Optional[float]:
+        """Rating of `side` as an opponent, for the other side's rating update (None = unrated, e.g. LLMs)."""
+        spec = self.white if side == "white" else self.black
+        if spec.type == "human":
+            return self.ratings[side]["before"] if side in self.ratings else None
+        if spec.type == "stockfish":
+            if spec.auto:
+                e = self.engine_elo[side]
+                return sum(e) / len(e) if e else None
+            return spec.elo or 3200
+        if spec.type == "lc0":
+            return 3000
+        return None
+
+    def apply_ratings(self):
+        changed = False
+        for side, other, win in (("white", "black", "1-0"), ("black", "white", "0-1")):
+            r = self.ratings.get(side)
+            opp = self.opp_strength(other)
+            if not r or opp is None or r["profile"] not in PROFILES:
+                continue
+            score = 1.0 if self.result == win else 0.5 if self.result == "1/2-1/2" else 0.0
+            p = PROFILES[r["profile"]]
+            k = 40 if p["games"] < 10 else 24
+            delta = round(k * (score - 1 / (1 + 10 ** ((opp - r["before"]) / 400))))
+            p["rating"] += delta
+            p["games"] += 1
+            p["w" if score == 1 else "d" if score == 0.5 else "l"] += 1
+            opp_label = (self.black if side == "white" else self.white).label()
+            p["history"].append({"t": time.time(), "rating": p["rating"], "delta": delta, "game": self.id,
+                                 "opp": opp_label, "score": score})
+            r.update(after=p["rating"], delta=delta, opp=round(opp))
+            changed = True
+        if changed:
+            save_profiles()
+
+    def seat_open(self, side: str) -> bool:
+        spec = self.white if side == "white" else self.black
+        return spec.type == "human" and spec.remote and spec._seat is None
+
+    def can_move(self, cid: Optional[str], color: bool) -> bool:
+        spec = self.spec_for(color)
+        if spec._seat is None:
+            return not spec.remote  # an open remote seat waits for the joining device
+        return spec._seat == cid
 
     def add_log(self, entry: dict):
         self.log.append(entry)
@@ -643,6 +839,7 @@ class Game:
         self.result, self.termination = result, termination
         self.status = "finished"
         self.thinking_since = None
+        self.apply_ratings()
         self.touch()
         self.save()
 
@@ -651,6 +848,8 @@ class Game:
 
     async def run(self):
         self.status = "running"
+        for side in ("white", "black"):
+            self.snapshot_rating(side)
         self.touch()
         players = {chess.WHITE: make_player(self.white, chess.WHITE, self),
                    chess.BLACK: make_player(self.black, chess.BLACK, self)}
@@ -699,16 +898,19 @@ class Game:
             for p in players.values():
                 await p.close()
 
-    def state(self, full: bool = True) -> dict:
+    def state(self, full: bool = True, cid: Optional[str] = None) -> dict:
         b = self.board
-        human_turn = self.status == "running" and self.awaiting_human
+        human_turn = self.status == "running" and self.awaiting_human and self.can_move(cid, b.turn)
         s = {
             "id": self.id, "match_id": self.match_id, "index": self.index,
             "white": {"label": self.white.label(), **self.white.model_dump()},
             "black": {"label": self.black.label(), **self.black.model_dump()},
             "status": self.status, "result": self.result, "termination": self.termination,
             "plies": len(b.move_stack), "created": self.created, "version": self.version,
-            "stats": self.stats,
+            "stats": self.stats, "ratings": self.ratings, "code": self.code,
+            "open_seats": [side for side in ("white", "black") if self.seat_open(side)],
+            "remote_sides": [side for side, sp in (("white", self.white), ("black", self.black))
+                             if sp.type == "human" and sp.remote],
         }
         if not full:
             return s
@@ -725,6 +927,10 @@ class Game:
             legal=[m.uci() for m in b.legal_moves] if human_turn else [],
             thinking_for=round(time.time() - self.thinking_since, 1) if self.thinking_since else None,
             log=self.log, evals=self.evals, pgn=self.pgn(), opts=self.opts.model_dump(),
+            my_sides=[side for side, sp in (("white", self.white), ("black", self.black))
+                      if sp.type == "human" and cid and sp._seat == cid],
+            is_host=bool(cid and cid == self.host),
+            engine_now={side: round(e[-1]) for side, e in self.engine_elo.items() if e},
         )
         return s
 
@@ -780,9 +986,27 @@ async def config():
     }
 
 
+def new_code() -> str:
+    used = {g.code for g in GAMES.values() if g.status in ("running", "queued")}
+    while True:
+        code = f"{random.randint(1000, 9999)}"
+        if code not in used:
+            return code
+
+
+def apply_profile(spec: PlayerSpec):
+    if spec.type == "human" and spec.profile:
+        if spec.profile not in PROFILES:
+            raise HTTPException(400, "unknown profile")
+        spec.name = PROFILES[spec.profile]["name"]
+
+
 @app.post("/api/games")
-async def create(req: NewGame):
+async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
+        apply_profile(spec)
+        if spec.type == "human" and not spec.remote:
+            spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):
             raise HTTPException(400, "LLM players need an endpoint and a model")
         if spec.type == "lc0" and not LC0_UCI_TCP:
@@ -794,10 +1018,12 @@ async def create(req: NewGame):
             raise HTTPException(400, "invalid FEN")
     n = max(1, min(100, req.games))
     match_id = uuid.uuid4().hex[:8]
+    code = new_code() if "human" in (req.white.type, req.black.type) else None
     games = []
     for i in range(n):
         w, b = (req.black, req.white) if (req.swap_colors and i % 2) else (req.white, req.black)
         g = Game(w, b, req, match_id, i + 1)
+        g.code, g.host = code, x_client_id
         GAMES[g.id] = g
         games.append(g)
     task = asyncio.create_task(run_match(games))
@@ -824,6 +1050,8 @@ async def list_games():
 def engine_settings(p: dict) -> str:
     """Strength settings shown under an engine's name in the standings (they also separate its rows)."""
     if p.get("type") == "stockfish":
+        if p.get("auto"):
+            return f"auto: {AUTO_BELOW} below a human's rating"
         elo = f"{p['elo']} Elo" if p.get("elo") else "full strength"
         return f"{elo} · {p.get('movetime', 0.5):g}s/move"
     if p.get("type") == "lc0":
@@ -840,7 +1068,12 @@ async def standings():
         for side, other, win in (("white", "black", "1-0"), ("black", "white", "0-1")):
             p = d[side]
             settings = engine_settings(p)
-            row = table.setdefault((p["label"], settings), {"label": p["label"], "type": p["type"], "settings": settings,
+            pid = p.get("profile") if p.get("profile") in PROFILES else None
+            key = ("profile", pid) if pid else (p["label"], settings)
+            label = PROFILES[pid]["name"] if pid else p["label"]
+            row = table.setdefault(key, {"label": label, "type": p["type"], "settings": settings,
+                                         "profile": pid, "rating": PROFILES[pid]["rating"] if pid else None,
+                                         "emoji": PROFILES[pid]["emoji"] if pid else None,
                                                             "games": 0, "w": 0, "d": 0, "l": 0, "illegal": 0,
                                                             "random_moves": 0})
             row["games"] += 1
@@ -866,12 +1099,16 @@ def get_game(gid) -> Game:
 
 
 @app.get("/api/games/{gid}")
-async def game_state(gid: str, since: int = -1):
+async def game_state(gid: str, since: int = -1, x_client_id: Optional[str] = Header(None)):
     if gid in GAMES:
         g = GAMES[gid]
-        if since == g.version and g.thinking_since is None:
-            return {"unchanged": True, "version": g.version}
-        return g.state()
+        if since == g.version:
+            # long poll: answer as soon as something changes, so the other device sees moves instantly
+            try:
+                await asyncio.wait_for(g.changed.wait(), 25)
+            except asyncio.TimeoutError:
+                return {"unchanged": True, "version": g.version}
+        return g.state(cid=x_client_id)
     if gid in ARCHIVE:
         return ARCHIVE[gid]
     raise HTTPException(404, "game not found")
@@ -887,9 +1124,9 @@ async def game_pgn(gid: str):
 
 
 @app.post("/api/games/{gid}/move")
-async def human_move(gid: str, m: HumanMove):
+async def human_move(gid: str, m: HumanMove, x_client_id: Optional[str] = Header(None)):
     g = get_game(gid)
-    if not (g.status == "running" and g.awaiting_human):
+    if not (g.status == "running" and g.awaiting_human and g.can_move(x_client_id, g.board.turn)):
         raise HTTPException(409, "not your turn")
     try:
         mv = chess.Move.from_uci(m.uci)
@@ -903,9 +1140,9 @@ async def human_move(gid: str, m: HumanMove):
 
 
 @app.post("/api/games/{gid}/resign")
-async def resign(gid: str):
+async def resign(gid: str, x_client_id: Optional[str] = Header(None)):
     g = get_game(gid)
-    if g.status == "running" and g.awaiting_human:
+    if g.status == "running" and g.awaiting_human and g.can_move(x_client_id, g.board.turn):
         g.awaiting_human = False
         await g.human_moves.put(None)
         return {"ok": True}
@@ -933,6 +1170,126 @@ async def delete(gid: str):
     GAMES.pop(gid, None)
     ARCHIVE.pop(gid, None)
     (GAMES_DIR / f"{gid}.json").unlink(missing_ok=True)
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- network play
+
+def live_match_game(code: str) -> Optional[Game]:
+    live = [g for g in GAMES.values() if g.code == code and g.status in ("running", "queued")]
+    return min(live, key=lambda g: g.index) if live else None
+
+
+@app.get("/api/open")
+async def open_games(x_client_id: Optional[str] = Header(None)):
+    """Live games with a human seat waiting for another device (the Join screen lists these)."""
+    out = []
+    for g in GAMES.values():
+        if g.status not in ("running", "queued") or not g.code:
+            continue
+        if live_match_game(g.code) is not g:
+            continue
+        for side in ("white", "black"):
+            if g.seat_open(side):
+                other = g.black if side == "white" else g.white
+                out.append({"id": g.id, "code": g.code, "side": side, "opponent": other.label(),
+                            "opponent_type": other.type, "created": g.created, "mine": g.host == x_client_id})
+    return sorted(out, key=lambda x: -x["created"])
+
+
+@app.post("/api/join")
+async def join(req: JoinReq, x_client_id: Optional[str] = Header(None)):
+    if not x_client_id:
+        raise HTTPException(400, "missing client id")
+    g = live_match_game(req.code.strip())
+    if not g:
+        raise HTTPException(404, "no game with that code")
+    specs = {"white": g.white, "black": g.black}
+    side = next((s for s, sp in specs.items() if sp.type == "human" and sp._seat == x_client_id and sp.remote), None)
+    side = side or next((s for s in specs if g.seat_open(s)), None)
+    if not side:
+        raise HTTPException(409, "that game has no free seat")
+    spec = specs[side]
+    spec._seat = x_client_id
+    if req.profile:
+        if req.profile not in PROFILES:
+            raise HTTPException(400, "unknown profile")
+        spec.profile, spec.name = req.profile, PROFILES[req.profile]["name"]
+    elif req.name:
+        spec.profile, spec.name = None, req.name.strip()[:40] or None
+    # the seat's spec is shared by every game of the match; refresh ratings of the ones already running
+    for other in GAMES.values():
+        if other.match_id == g.match_id and other.status == "running":
+            other.snapshot_rating("white" if other.white is spec else "black")
+            other.touch()
+    g.touch()
+    return {"id": g.id, "side": side}
+
+
+@app.post("/api/games/{gid}/free/{side}")
+async def free_seat(gid: str, side: Literal["white", "black"], x_client_id: Optional[str] = Header(None)):
+    """Host only: open a remote seat again (e.g. the kid switched phones)."""
+    g = get_game(gid)
+    if not x_client_id or x_client_id != g.host:
+        raise HTTPException(403, "only the device that started the game can do that")
+    spec = g.white if side == "white" else g.black
+    if spec.type != "human":
+        raise HTTPException(400, "not a human seat")
+    spec.remote, spec._seat = True, None
+    g.touch()
+    return {"ok": True}
+
+
+@app.post("/api/games/{gid}/say")
+async def human_say(gid: str, req: SayReq, x_client_id: Optional[str] = Header(None)):
+    g = get_game(gid)
+    sides = [s for s, sp in (("white", g.white), ("black", g.black)) if sp.type == "human" and x_client_id and sp._seat == x_client_id]
+    text = req.text.strip()[:140]
+    if not sides or not text:
+        raise HTTPException(403, "only players can chat")
+    side = sides[0] if len(sides) == 1 else ("white" if g.board.turn else "black")
+    g.add_log({"ply": len(g.board.move_stack), "side": side, "kind": "chat", "say": text, "t": time.time()})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- profiles api
+
+@app.get("/api/profiles")
+async def list_profiles():
+    return sorted(PROFILES.values(), key=lambda p: p["created"])
+
+
+@app.post("/api/profiles")
+async def create_profile(p: ProfileIn):
+    if not (p.name or "").strip():
+        raise HTTPException(400, "name required")
+    pid = uuid.uuid4().hex[:8]
+    PROFILES[pid] = new_profile(pid, p.name.strip()[:40], (p.emoji or "🙂").strip()[:8],
+                                p.rating if p.rating else START_RATING)
+    save_profiles()
+    return PROFILES[pid]
+
+
+@app.patch("/api/profiles/{pid}")
+async def update_profile(pid: str, p: ProfileIn):
+    if pid not in PROFILES:
+        raise HTTPException(404)
+    prof = PROFILES[pid]
+    if p.name and p.name.strip():
+        prof["name"] = p.name.strip()[:40]
+    if p.emoji and p.emoji.strip():
+        prof["emoji"] = p.emoji.strip()[:8]
+    if p.rating is not None and p.rating != prof["rating"]:
+        prof["rating"] = max(100, min(3000, p.rating))
+        prof["history"].append({"t": time.time(), "rating": prof["rating"], "manual": True})
+    save_profiles()
+    return prof
+
+
+@app.delete("/api/profiles/{pid}")
+async def delete_profile(pid: str):
+    PROFILES.pop(pid, None)
+    save_profiles()
     return {"ok": True}
 
 

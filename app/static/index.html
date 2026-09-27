@@ -17,10 +17,13 @@
   <nav class="seg">
     <button data-view="play" class="active">♟ Play</button>
     <button data-view="games">📜 Games</button>
+    <button data-view="players">👪 Players</button>
     <button data-view="standings">🏆 Standings</button>
   </nav>
+  <button class="join-btn" id="join-open" title="Join a game on this device">🔑 Join</button>
   <button class="icon-btn" id="theme" title="Light / dark">🌙</button>
 </header>
+<div class="live-strip" id="live-strip" hidden></div>
 
 <main>
   <!-- PLAY VIEW -->
@@ -74,6 +77,7 @@
         <label class="toggle"><input type="checkbox" id="sound"><span>🔊 sound</span></label>
         <span class="grow"></span>
         <button id="resign" class="danger" hidden>🏳 Resign</button>
+        <button id="free-seat" hidden title="Let another device take the remote seat">🔓 Free seat</button>
         <button id="abort" class="danger" hidden>⏹ Abort</button>
         <button id="pgn">PGN</button>
       </div>
@@ -93,6 +97,7 @@
         <label class="toggle" data-for="log" hidden><input type="checkbox" id="show-reasoning"><span>reasoning</span></label>
       </div>
       <div class="chat" id="chat"></div>
+      <div class="react" id="react" hidden></div>
       <div class="log" id="log" hidden></div>
     </aside>
   </section>
@@ -102,6 +107,15 @@
     <div class="card wide">
       <h2>Games</h2>
       <div class="tbl-wrap"><table class="tbl" id="games-table"></table></div>
+    </div>
+  </section>
+
+  <!-- PLAYERS VIEW -->
+  <section id="view-players" class="view">
+    <div class="card wide">
+      <h2>Players</h2>
+      <p class="muted">Each player has a rating that goes up when they win and down when they lose. Auto Stockfish plays a little below it, so every game is a challenge.</p>
+      <div class="profiles" id="profiles"></div>
     </div>
   </section>
 
@@ -115,6 +129,21 @@
   </section>
 </main>
 
+<div class="modal" id="join-modal" hidden>
+  <div class="join-box">
+    <div class="card-head"><h2>🔑 Join a game</h2><button class="icon-btn small" id="join-close" title="Close">✕</button></div>
+    <div class="join-step">1. Who are you?</div>
+    <div class="who-grid" id="join-who"></div>
+    <div class="join-step">2. Pick a game</div>
+    <div class="open-list" id="join-list"></div>
+    <div class="join-code">
+      <span>or type the code</span>
+      <input id="join-code" inputmode="numeric" pattern="[0-9]*" maxlength="4" placeholder="1234" autocomplete="off">
+      <button class="primary" id="join-go">Join</button>
+    </div>
+    <div class="err" id="join-err"></div>
+  </div>
+</div>
 <div class="modal" id="promo" hidden><div class="promo-box" id="promo-box"></div></div>
 <div class="modal" id="pgn-modal" hidden>
   <div class="pgn-box"><h2>PGN</h2><textarea id="pgn-text" readonly></textarea>
