@@ -141,10 +141,23 @@ async def probe_endpoint(name: str, url: str) -> Optional[list[str]]:
     return [m["id"] for m in models]
 
 
+def sibling_model_key(endpoint: str, mid: str) -> str:
+    """An alias we couldn't resolve (e.g. a proxy port without /props): use what another endpoint on the same
+    host says that alias is — typically the same server behind a different port."""
+    key = MODEL_KEYS.get((endpoint, mid), mid)
+    if key != mid or "current" not in mid.lower() or endpoint not in ENDPOINTS:
+        return key
+    host = httpx.URL(ENDPOINTS[endpoint]).host
+    for (ep, m), k in MODEL_KEYS.items():
+        if ep != endpoint and m == mid and k != mid and ep in ENDPOINTS and httpx.URL(ENDPOINTS[ep]).host == host:
+            return k
+    return key
+
+
 async def resolve_model_key(endpoint: str, model: str) -> str:
-    if (endpoint, model) not in MODEL_KEYS and endpoint in ENDPOINTS:
-        await probe_endpoint(endpoint, ENDPOINTS[endpoint])
-    return full_llm_key(MODEL_KEYS.get((endpoint, model), model), endpoint)
+    if endpoint in ENDPOINTS and ((endpoint, model) not in MODEL_KEYS or MODEL_KEYS[(endpoint, model)] == model):
+        await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))  # siblings may know the alias
+    return full_llm_key(sibling_model_key(endpoint, model), endpoint)
 
 
 def llm_key_of(p: dict) -> Optional[str]:
@@ -1535,7 +1548,7 @@ async def config():
     results = await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))
 
     def info(name, mid):
-        key = full_llm_key(MODEL_KEYS.get((name, mid), mid), name)
+        key = full_llm_key(sibling_model_key(name, mid), name)
         rec = LLM_RATINGS.get(key)
         return {"key": key, "name": rec["name"] if rec else key, "rating": rec["rating"] if rec else LLM_START_RATING,
                 "games": rec["games"] if rec else 0}
