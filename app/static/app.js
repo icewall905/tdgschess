@@ -60,6 +60,10 @@ const DEFAULTS = {
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
 let learnCfg = store.get("learn", { on: false, endpoint: null, model: null });
+// the player this device last picked (profile id), used as the default for every Human side and the Join screen
+let myProfile = store.get("myProfile", null);
+const rememberProfile = (pid) => { myProfile = pid || null; store.set("myProfile", myProfile); };
+const meHuman = () => ({ ...DEFAULTS.human, profile: myProfile });
 let lang = "en";  // chat lines, engine comments and the teacher; English unless Danish is picked for this game
 const T = {
   en: { teacher: "Teacher", you: "You", hint: "💡 Hint", explain: "❓ Explain last move", explainQ: "Can you explain the last move?",
@@ -125,7 +129,7 @@ function renderSide(side) {
       class: s.type === t ? "active" : "", type: "button", title: TYPES[t][1],
       onclick: () => {
         if (s.type === t) return;
-        setup[side] = { ...DEFAULTS[t] };
+        setup[side] = t === "human" ? meHuman() : { ...DEFAULTS[t] };
         if (t === "llm") Object.assign(setup[side], firstModel(side === "white" ? 0 : 1));
         store.set("setup", setup);
         renderSide(side);
@@ -189,7 +193,7 @@ function renderSide(side) {
   } else if (s.type === "human") {
     if (s.profile && !profileById(s.profile)) s.profile = null;
     const sel = h("select", {
-      onchange: (e) => { s.profile = e.target.value || null; store.set("setup", setup); renderSide(side); },
+      onchange: (e) => { s.profile = e.target.value || null; if (!s.remote) rememberProfile(s.profile); store.set("setup", setup); renderSide(side); },
     }, h("option", { value: "", selected: !s.profile }, "🙂 Guest"),
       ...profiles.map((p) => h("option", { value: p.id, selected: s.profile === p.id }, `${p.emoji} ${p.name} · ⭐ ${p.rating}`)));
     box.append(h("label", {}, s.remote ? "Who's playing? (they can pick when joining)" : "Who's playing?", sel));
@@ -258,11 +262,11 @@ function renderLang() {
 function applyPreset(p) {
   const llm = (i) => ({ ...DEFAULTS.llm, ...firstModel(i) });
   setup = {
-    "me-llm": { white: { ...DEFAULTS.human }, black: llm(0) },
+    "me-llm": { white: meHuman(), black: llm(0) },
     "llm-llm": { white: llm(0), black: llm(1) },
     "llm-sf": { white: llm(0), black: { ...DEFAULTS.stockfish, elo: 1400 } },
-    "me-sf": { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.stockfish } },
-    learn: { white: { ...DEFAULTS.human, profile: setup.white?.profile || setup.black?.profile || null }, black: { ...DEFAULTS.stockfish, auto: true } },
+    "me-sf": { white: meHuman(), black: { ...DEFAULTS.stockfish } },
+    learn: { white: meHuman(), black: { ...DEFAULTS.stockfish, auto: true } },
   }[p];
   learnCfg.on = p === "learn";
   store.set("learn", learnCfg);
@@ -843,7 +847,7 @@ function renderTeach(force) {
   const el = $("#teach"), ctl = $("#teach-controls");
   $(".tabs [data-tab=teach]").hidden = !game?.learning;
   if (!game?.learning) { el.replaceChildren(); ctl.hidden = true; teachSig = ""; return; }
-  $$("#teach-lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === game.lang));
+
   const entries = game.log.map((e, i) => ({ ...e, i })).filter((e) => e.kind === "teach" || e.kind === "ask");
   const busy = teachPending || game.teach_busy;
   const sig = `${game.id}:${entries.length}:${selectedTeach}:${busy}:${game.lang}`;
@@ -899,7 +903,15 @@ function setTab(tab) {
   if (tab === "chat") renderChat(true); else if (tab === "teach") renderTeach(true); else renderLog(true);
 }
 
+function renderGameLang() {
+  const el = $("#game-lang");
+  const live = game && (game.status === "running" || game.status === "queued");
+  el.hidden = !(live && (game.my_sides?.length || game.is_host));
+  $$("#game-lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === (game?.lang || "en")));
+}
+
 function renderAll() {
+  renderGameLang();
   renderBoard();
   renderBars();
   renderStatus();
@@ -1107,10 +1119,10 @@ async function renderProfiles() {
 
 // ------------------------------------------------------------ join (network play)
 let joinTimer = null;
-let me = store.get("me", { profile: null, name: "" });
+let me = store.get("me", { profile: store.get("myProfile", null), name: "" });
 
 function renderJoinWho() {
-  const pick = (profile) => { me = { ...me, profile }; store.set("me", me); renderJoinWho(); };
+  const pick = (profile) => { me = { ...me, profile }; store.set("me", me); rememberProfile(profile); renderJoinWho(); };
   $("#join-who").replaceChildren(
     ...profiles.map((p) => h("button", { type: "button", class: me.profile === p.id ? "active" : "", onclick: () => pick(p.id) },
       h("b", {}, p.emoji), p.name)),
@@ -1213,8 +1225,8 @@ $("#sound").onchange = () => { store.set("sound", $("#sound").checked); if ($("#
 $("#show-best").onchange = () => { store.set("showBest", $("#show-best").checked); renderBoard(); };
 $$(".tabs [data-tab]").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
 $$("#opt-lang button").forEach((b) => { b.onclick = () => { lang = b.dataset.lang; renderLang(); }; });
-$$("#teach-lang button").forEach((b) => { b.onclick = async () => {
-  if (!game?.learning) return;
+$$("#game-lang button").forEach((b) => { b.onclick = async () => {
+  if (!game) return;
   try { await api(`/api/games/${game.id}/lang`, { method: "POST", body: JSON.stringify({ lang: b.dataset.lang }) }); } catch (e) { alert(e.message); }
   poll(true);
 }; });

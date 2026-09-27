@@ -1970,8 +1970,12 @@ async def learning_ask(gid: str, req: AskReq, x_client_id: Optional[str] = Heade
 
 
 @app.post("/api/games/{gid}/lang")
-async def learning_lang(gid: str, req: LangReq, x_client_id: Optional[str] = Header(None)):
-    g = learning_game(gid, x_client_id)
+async def game_lang(gid: str, req: LangReq, x_client_id: Optional[str] = Header(None)):
+    """Switch the game's language (LLM chat lines, engine comments, chat replies, teacher) mid-game."""
+    g = get_game(gid)
+    players = [sp._seat for sp in (g.white, g.black) if sp.type == "human"]
+    if x_client_id != g.host and x_client_id not in players:
+        raise HTTPException(403, "only the players can change the language")
     g.opts.lang = req.lang
     g.touch()
     return {"ok": True}

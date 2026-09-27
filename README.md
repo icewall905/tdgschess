@@ -43,8 +43,9 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   kid mentions ("what if Nf3?", Danish letters too) are checked by Stockfish first. A "🏹 arrows" switch in the
   Teacher tab turns the board arrows/highlights on or off (remembered per device). Learning games don't change
   ratings and are left out of Standings.
-- Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments and the teacher
-  (the teacher can also switch mid-game).
+- Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments, chat replies and the
+  teacher. The 🇬🇧/🇩🇰 switch next to the game's tabs changes it mid-game (players and the host device only).
+- Each device remembers the player it last picked (profile) and uses it for presets, new Human sides and Join.
 - LLM chat replies: when a player writes in the chat, the LLM players with chat on (and engines with an LLM
   commentator) answer within a few seconds in a separate background call — the game never waits. A burst of
   messages gets one reply; messages arriving while it types are answered once more afterwards. Replies stay on
