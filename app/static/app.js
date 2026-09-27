@@ -934,8 +934,8 @@ function renderRecap(force) {
   if (!done) { el.replaceChildren(); return; }
   if (recapFor && recapFor !== `${game.id}:${recapLang()}`) { recapData = null; recapFor = ""; if (store.get("infoTab") === "recap") loadRecap(); }
   const cur = shownPly();
-  const sig = `${game.id}:${recapLang()}:${recapData?.moves?.filter(Boolean).length}:${recapData?.status}:${!!recapData?.summary}:${cur}`;
-  if (sig === recapSig && !force) return;
+  const sig = `${game.id}:${recapLang()}:${recapData?.moves?.filter(Boolean).length}:${recapData?.status}:${!!recapData?.summary}`;
+  if (sig === recapSig && !force) { markRecapCur(true); return; }
   recapSig = sig;
   const t = RECAP_T[recapLang()] || RECAP_T.en;
   const langSeg = h("div", { class: "seg small" }, ...["en", "da"].map((l) => h("button", {
@@ -975,9 +975,45 @@ function renderRecap(force) {
         h("span", { class: `badge q-${cls}` }, `${sym} ${cls}`), e.better ? h("span", { class: "muted" }, `${t.better}: ${e.better}`) : null),
       h("div", { class: "rc-text" }, e.text || "…")));
   });
+  const keep = el.scrollTop;
   el.replaceChildren(...items);
-  $(".rc-card.move.cur", el)?.scrollIntoView({ block: "nearest" });
+  el.scrollTop = keep;
+  markRecapCur(!force);
 }
+
+// the board follows the story: the card at the reading line is the move on the board, and stepping through the
+// moves (◀ ▶ / keys) scrolls the story along
+let recapDriven = false, recapScrollQueued = false;
+function markRecapCur(scroll) {
+  const el = $("#recap");
+  if (el.hidden) return;
+  const cur = shownPly();
+  let target = null;
+  $$(".rc-card.move", el).forEach((c) => {
+    const on = Number(c.dataset.ply) === cur;
+    c.classList.toggle("cur", on);
+    if (on) target = c;
+  });
+  if (scroll && target && !recapDriven) {
+    const box = el.getBoundingClientRect(), r = target.getBoundingClientRect();
+    if (r.top < box.top || r.bottom > box.bottom) el.scrollTop += r.top - box.top - box.height * 0.2;
+  }
+}
+$("#recap").addEventListener("scroll", () => {
+  if (recapScrollQueued) return;
+  recapScrollQueued = true;
+  requestAnimationFrame(() => {
+    recapScrollQueued = false;
+    const el = $("#recap");
+    const line = el.getBoundingClientRect().top + el.clientHeight * 0.35;
+    const cards = $$(".rc-card.move", el);
+    if (!cards.length || !game) return;
+    let pick = cards.find((c) => c.getBoundingClientRect().bottom > line) || cards[cards.length - 1];
+    if (el.scrollTop < 5 && cards[0].getBoundingClientRect().top > line) pick = null;  // at the summary: start position
+    const ply = pick ? Number(pick.dataset.ply) : 0;
+    if (ply !== shownPly()) { recapDriven = true; setView(ply); recapDriven = false; }
+  });
+});
 
 function setTab(tab) {
   store.set("infoTab", tab);
@@ -1052,6 +1088,7 @@ async function poll(force = false) {
     }
     if (first) { selectedTeach = null; selectedChat = null; teachPending = 0; recapData = null; recapFor = ""; recapSig = ""; }
     game = s;
+    if (first && store.get("infoTab", "chat") === "recap") setTimeout(loadRecap, 0);
     if (first && s.learning) setTab("teach");
     else if (first && store.get("infoTab", "chat") === "teach" && !s.learning) setTab("chat");
     if (prev && !prev.human_turn && game.human_turn && game.my_sides?.length) navigator.vibrate?.(120);

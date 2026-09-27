@@ -63,7 +63,8 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   those facts, then a summary with the turning points, mistake counts and three lessons. The reader is the human
   player ("you"), the other side is named. Entries are written during the game in quiet moments (2.5 s without
   a move), so at the end only the missing ones are generated; the page fills in as they arrive. Clicking a move
-  shows the position before it with arrows (red = played, orange = the answer, green = better). Recaps are saved
+  shows the position before it with arrows (red = played, orange = the answer, green = better); scrolling the story
+  moves the board along (the card at the reading line is shown), and ◀ ▶ scroll the story. Recaps are saved
   in `data/recaps/<game>-<lang>.json`.
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
