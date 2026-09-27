@@ -102,8 +102,13 @@ class CoachEngine:
                 line.append(b.san(mv))
                 b.push(mv)
             score = info["score"].pov(board.turn)
+            reply_words = None
+            if len(pv) > 1:
+                rb = board.copy()
+                rb.push(pv[0])
+                reply_words = move_words(rb, pv[1])
             out.append({"move": pv[0], "san": line[0], "words": move_words(board, pv[0]), "line": line,
-                        "cp": score.score(mate_score=100000), "mate": score.mate()})
+                        "reply_words": reply_words, "cp": score.score(mate_score=100000), "mate": score.mate()})
         return out
 
 
@@ -200,9 +205,12 @@ def facts_text(a: dict, who: str) -> str:
              f"- Evaluation for {who}: {a['eval']}",
              f"- Material: {material}"]
     if a["top"]:
-        lines.append(f"- Best moves for {who} now: " + "; ".join(
-            f"{i + 1}. {t['words']} ({eval_words(t['cp'], t['mate'])}), plan: {' '.join(t['line'])}"
-            for i, t in enumerate(a["top"])))
+        lines.append(f"- Best moves for {who} now (with the computer's best answer to each):")
+        for i, t in enumerate(a["top"]):
+            answer = ""
+            if len(t["line"]) > 1:  # spell out the reply, so "won't you just take my rook?" gets a true answer
+                answer = f"; the computer answers {t['reply_words']}" if t.get("reply_words") else f"; the computer answers {t['line'][1]}"
+            lines.append(f"  {i + 1}. {t['words']} ({eval_words(t['cp'], t['mate'])}){answer}; line: {' '.join(t['line'])}")
     if a.get("opponent_plan"):
         lines.append(f"- The computer's plan: {' '.join(a['opponent_plan'])}")
     if a["threat"]:

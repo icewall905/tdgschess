@@ -632,8 +632,10 @@ person would: surprise ("Hey, sneaky!"), worry ("Uh-oh, my rook is in trouble"),
 coming for you!"), jokes, bragging about a plan, and admitting your own mistakes ("Oops, I just gave away my \
 bishop!"). Only praise the other player's move when the facts say it was good or the best - never call a move \
 strong just to be nice. Mention the opening only when the facts say a new opening was reached. Follow the ANGLE \
-given with the facts. Don't start with "Wow" or "That was a super strong move", and don't repeat your recent \
-lines. 1-2 short sentences, at most two emojis, in character, kid-friendly (never mean, scary or rude)."""
+given with the facts. Never use these worn-out phrases: "Wow", "That was a super strong move", "Great move", \
+"You're playing really well", "Det var et super stærkt træk", "Godt spillet", "Hold da op, for et godt træk", \
+"Du spiller virkelig godt". Start every message differently and don't repeat your recent lines. \
+1-2 short sentences, at most two emojis, in character, kid-friendly (never mean, scary or rude)."""
 
 
 CHAT_PROMPT = """
@@ -976,13 +978,16 @@ def has_unread_chat(game, side: str) -> bool:
 
 
 CHAT_REPLY_PROMPT = """You are {persona}, playing {color} in a chess game that children are watching and playing. \
-A player just wrote in the game chat. Reply in 1-3 short sentences, kind and fun, in character.
+A player just wrote in the game chat. Reply in 1-3 short sentences, kind and fun, in character. Answer the \
+question directly; don't start every reply with a greeting or their name, and avoid empty words like "super \
+strong" - say concretely what a move does (what it attacks, takes, defends or threatens, and what the answer is).
 Always keep the conversation on THIS chess game: if they ask about something else, answer in a few friendly words \
 and bring it right back to the board. Be eager to teach: explain one real idea from the "Chess facts" (they come \
 from the Stockfish engine and are true) - the opening's name, a plan, a threat, why a move was good or a mistake. \
 If a player asks for help or a hint, help them gladly: suggest one of THEIR best moves from the "Facts for the \
 player" and explain simply WHY it is good (what it attacks, defends or prepares), so they learn the idea - not just \
-the move. Don't give away their best moves when they haven't asked.
+the move. Use the listed computer answers to be honest ("if you take on f7, my king takes your rook back").
+Don't give away their best moves when they haven't asked.
 Never invent moves or pieces that are not in the facts. Kid-friendly: never mean, scary or rude. {lang}"""
 
 
@@ -1039,6 +1044,76 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     if text:
         game.add_log({"ply": len(game.board.move_stack), "side": side, "kind": "chat", "bot": True,
                       "say": text[:400], "t": time.time()})
+
+
+CLOSING_PROMPT = """You are {persona}, and a chess game you played as {color} against {opp} just ended. Write the \
+closing message a friendly human opponent would say (2-3 short sentences): a warm "good game" that fits the \
+result (congratulate them if they won, be a good sport; if you won, be kind and encouraging), what decided the \
+game (the key moment from the facts), and ONE concrete tip they can use next time. Only name moves that appear in \
+the facts - never invent moves. In character, kid-friendly, at most two emojis. Reply with only the message. {lang}"""
+
+
+def key_moment(game) -> Optional[str]:
+    """The move that swung the game most, from the eval bar's scores."""
+    ev = game.evals
+    if len(ev) < 3:
+        return None
+    replay = chess.Board(game.opts.start_fen) if game.opts.start_fen else chess.Board()
+    best, when = 0.0, None
+    frac = lambda e: 0.5 if not e else (1.0 if (e.get("mate") or 0) > 0 else 0.0) if e.get("mate") is not None \
+        else 1 / (1 + math.exp(-(e.get("cp") or 0) / 250))
+    for i, mv in enumerate(game.board.move_stack):
+        if i + 1 >= len(ev):
+            break
+        swing = abs(frac(ev[i + 1]) - frac(ev[i]))
+        if swing > best:
+            best, when = swing, (replay.fullmove_number, replay.turn, move_words(replay, mv))
+        replay.push(mv)
+    if not when or best < 0.2:
+        return None
+    n, turn, words = when
+    return f"The turning point was move {n}: {'White' if turn else 'Black'} played {words}"
+
+
+async def closing_chat(game, side: str, spec: PlayerSpec):
+    color = side == "white"
+    win = "1-0" if color else "0-1"
+    outcome = "you won" if game.result == win else "it was a draw" if game.result == "1/2-1/2" else "you lost"
+    facts = [f"Result: {game.result} ({game.termination}) - {outcome}"]
+    if game.board.move_stack:
+        b = game.board.copy()
+        last = b.pop()
+        facts.append(f"The final move: {'White' if b.turn else 'Black'} played {move_words(b, last)}")
+    km = key_moment(game)
+    if km:
+        facts.append(km)
+    opening = opening_of(game.board)
+    if opening:
+        facts.append(f"The opening was the {opening}")
+    other = "black" if color else "white"
+    r = (game.ratings or {}).get(other)
+    if r and r.get("delta") is not None:
+        facts.append(f"The other player's rating went {r['before']} -> {r['after']}")
+    endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
+    base = ENDPOINTS.get(endpoint or "", endpoint or "")
+    body = {"model": model, "temperature": 0.8, "max_tokens": 300, "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": CLOSING_PROMPT.format(
+                persona=spec.persona.strip() or "a cheerful chess buddy", color="White" if color else "Black",
+                opp=game.spec_for(not color).label(), lang=chat_lang_line(game))},
+                {"role": "user", "content": "\n".join(f"- {f}" for f in facts)}]}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
+            resp = await client.post(base.rstrip("/") + "/chat/completions", json=body,
+                                     headers={"Authorization": f"Bearer {API_KEY}"})
+            resp.raise_for_status()
+            text = resp.json()["choices"][0]["message"].get("content") or ""
+    except Exception:
+        return
+    text = THINK_RE.sub("", text).strip().strip("\"'`*").strip()
+    if text:
+        game.add_log({"ply": len(game.board.move_stack), "side": side, "kind": "chat", "bot": True, "closing": True,
+                      "say": text[:500], "t": time.time()})
+        game.save()  # finished games are archived from disk: keep the goodbye
 
 
 def schedule_chat_replies(game):
@@ -1393,6 +1468,8 @@ class Game:
         self.apply_ratings()
         self.touch()
         self.save()
+        for side, spec in chat_responders(self):
+            coach.background(closing_chat(self, side, spec))
 
     def save(self):
         (GAMES_DIR / f"{self.id}.json").write_text(json.dumps(self.state(full=True)))

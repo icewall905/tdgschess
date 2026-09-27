@@ -101,7 +101,10 @@ one ANGLE picked (weighted) from what Stockfish says actually happened — admit
 other player's mistake, react to a capture, tease a check or an attacked piece, worry about a threat, cheeky
 confidence or a comeback — plus the last 3 lines to avoid repeats. Praise only for moves the engine rates good
 or best; the opening is named once (and again when it changes). The commentator skips about half of the moves
-where nothing notable happened. Danish messages get the Danish piece names.
+where nothing notable happened. Danish messages get the Danish piece names. Worn-out phrases
+("super strong move", "Godt spillet", "Wow"...) are banned. When the game ends, every talking LLM sends a closing
+message: a good-game in character, the turning point (largest eval swing) and one tip. Hint answers list the
+computer's reply to each suggested move, so questions like "won't you just take my rook?" get a true answer.
 
 Chat lines are "chess-smart": LLM players and the engines' LLM commentator get Chat facts from Stockfish — the
 opening name (Lichess CC0 opening list, `app/data/openings.tsv`), the engine's verdict on the opponent's last
