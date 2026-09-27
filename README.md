@@ -56,6 +56,15 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   hints it isn't needed, and Gemma 12B took 9-22 s and often lost its chat line to the token budget (2.8 s
   off). "🧠 Let it think" turns it on (rated separately, "…, think").
 - Pure LLM toggle: no Stockfish hints/overview (legal-move list on); rated separately as "…, pure".
+- 📖 Recap (finished games: button on the result banner, a 📖 in Games, or the Recap tab): a move-by-move review
+  in English or Danish (`app/recap.py`). Stockfish grades each move (best/good/inaccuracy/mistake/blunder) and
+  `coach.move_reasons`/`follow_up` work out what it did, what was better and why, and what could have happened;
+  an LLM (first endpoint, thinking off, 3 calls in parallel) writes 1-2 calm, child-level paragraphs per move from
+  those facts, then a summary with the turning points, mistake counts and three lessons. The reader is the human
+  player ("you"), the other side is named. Entries are written during the game in quiet moments (2.5 s without
+  a move), so at the end only the missing ones are generated; the page fills in as they arrive. Clicking a move
+  shows the position before it with arrows (red = played, orange = the answer, green = better). Recaps are saved
+  in `data/recaps/<game>-<lang>.json`.
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).

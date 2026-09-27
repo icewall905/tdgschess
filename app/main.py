@@ -20,7 +20,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, PrivateAttr
 
-from app import coach
+from app import coach, recap
 
 # ---------------------------------------------------------------- config
 
@@ -1433,6 +1433,7 @@ class Game:
         self.engine_elo: dict[str, list[float]] = {"white": [], "black": []}
         self.review: Optional[dict] = None  # learning mode: a blunder waiting for "undo" / "keep"
         self.last_seen = time.time()  # last time any device looked at or played in this game
+        self.last_move_at = time.time()
         self.hibernating = False
         self.teach_task: Optional[asyncio.Task] = None  # learning: the running per-turn explanation
         self.teach_busy = False
@@ -1596,8 +1597,10 @@ class Game:
                         continue  # the learner moves again
                 before = b.copy()
                 b.push(mv)
+                self.last_move_at = time.time()
                 self.thinking_since = None
                 self.touch()
+                recap.on_move(self)
                 if self.opts.learning:
                     self.queue_explanation(before, mv, rev if isinstance(rev, dict) else None)
                 if self.opts.analysis:
@@ -2061,6 +2064,8 @@ async def delete(gid: str):
     GAMES.pop(gid, None)
     ARCHIVE.pop(gid, None)
     (GAMES_DIR / f"{gid}.json").unlink(missing_ok=True)
+    for lang in ("en", "da"):
+        recap.recap_path(gid, lang).unlink(missing_ok=True)
     return {"ok": True}
 
 
@@ -2205,6 +2210,32 @@ async def game_lang(gid: str, req: LangReq, x_client_id: Optional[str] = Header(
     g.opts.lang = req.lang
     g.touch()
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- recap api
+
+class RecapReq(BaseModel):
+    lang: Literal["en", "da"] = "en"
+
+
+@app.post("/api/games/{gid}/recap")
+async def recap_start(gid: str, req: RecapReq):
+    d = recap.game_data(gid)
+    if not d:
+        raise HTTPException(404, "game not found")
+    if d["status"] in ("running", "queued"):
+        raise HTTPException(409, "the recap is available when the game is over")
+    if not d.get("uci"):
+        raise HTTPException(400, "no moves to review")
+    return recap.start(gid, req.lang)
+
+
+@app.get("/api/games/{gid}/recap")
+async def recap_get(gid: str, lang: Literal["en", "da"] = "en"):
+    data = recap.load(gid, lang)
+    if not data:
+        raise HTTPException(404, "no recap yet")
+    return data
 
 
 # ---------------------------------------------------------------- llm ratings api

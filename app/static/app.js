@@ -370,6 +370,11 @@ let selectedTeach = null, selectedChat = null;
 function boardMarks(ply) {
   const out = { arrows: [], squares: [] };
   if (!game || !$("#teach-arrows").checked) return out;
+  if (store.get("infoTab", "chat") === "recap" && recapData?.moves) {
+    const e = recapData.moves[ply];  // the move played from the position on screen
+    if (e) { out.arrows = [...(e.arrows || [])]; out.squares = [...(e.squares || [])]; }
+    return out;
+  }
   // chat suggestions (any game): the clicked one, else the latest one for the position on screen
   const chatSrc = selectedChat != null ? game.log[selectedChat]
     : [...game.log].reverse().find((e) => e.kind === "chat" && e.bot && e.arrows?.length && e.ply === ply && ply === game.san.length);
@@ -646,6 +651,7 @@ function renderStatus() {
     const winner = game.result === "1-0" ? "white" : game.result === "0-1" ? "black" : null;
     el.classList.add("win");
     line(winner ? `🏆 ${game[winner].label} wins!` : "🤝 It's a draw!", [game.result, game.termination, match].filter(Boolean).join(" · "));
+    if (game.san?.length) el.append(h("button", { class: "primary resume-big", type: "button", onclick: () => setTab("recap") }, "📖 Recap: go over the game"));
   } else if (game.open_seats?.length && (game.status === "running" || game.status === "queued")) {
     el.classList.add("live", "code");
     const side = game.open_seats[0];
@@ -898,6 +904,81 @@ function renderTeach(force) {
       input, h("button", { type: "submit" }, tr("send"))));
 }
 
+// ------------------------------------------------------------ recap
+let recapData = null, recapFor = "", recapTimer = null, recapSig = "";
+const RECAP_T = {
+  en: { title: "📖 The full story of this game", intro: "The coach goes through every move: what happened, what was good, what went wrong and what could have happened instead.",
+        start: "Start recap", working: "Analysing move", of: "of", summary: "Summary", better: "Better", lang: "Language",
+        counts: (c) => `${c.blunder} blunders · ${c.mistake} mistakes · ${c.inaccuracy} inaccuracies`, click: "Click a move to see it on the board." },
+  da: { title: "📖 Hele historien om partiet", intro: "Træneren gennemgår hvert træk: hvad der skete, hvad der var godt, hvad der gik galt, og hvad der kunne være sket i stedet.",
+        start: "Start gennemgang", working: "Analyserer træk", of: "af", summary: "Opsummering", better: "Bedre", lang: "Sprog",
+        counts: (c) => `${c.blunder} store fejl · ${c.mistake} fejl · ${c.inaccuracy} unøjagtigheder`, click: "Klik på et træk for at se det på brættet." },
+};
+const CLS = { best: ["⭐", "best"], good: ["✓", "good"], inaccuracy: ["?!", "inaccuracy"], mistake: ["?", "mistake"], blunder: ["??", "blunder"] };
+const recapLang = () => store.get("recapLang", null) || game?.lang || "en";
+
+async function loadRecap() {
+  if (!game?.san?.length || ["running", "queued"].includes(game.status)) return;
+  const key = `${game.id}:${recapLang()}`;
+  try { recapData = await api(`/api/games/${game.id}/recap?lang=${recapLang()}`); } catch { recapData = null; }
+  recapFor = key;
+  renderRecap(true);
+  clearTimeout(recapTimer);
+  if (recapData?.status === "running") recapTimer = setTimeout(loadRecap, 2000);
+}
+
+function renderRecap(force) {
+  const el = $("#recap");
+  const done = game && game.san?.length && !["running", "queued"].includes(game.status);
+  $(".tabs [data-tab=recap]").hidden = !done;
+  if (!done) { el.replaceChildren(); return; }
+  if (recapFor && recapFor !== `${game.id}:${recapLang()}`) { recapData = null; recapFor = ""; if (store.get("infoTab") === "recap") loadRecap(); }
+  const cur = shownPly();
+  const sig = `${game.id}:${recapLang()}:${recapData?.moves?.filter(Boolean).length}:${recapData?.status}:${!!recapData?.summary}:${cur}`;
+  if (sig === recapSig && !force) return;
+  recapSig = sig;
+  const t = RECAP_T[recapLang()] || RECAP_T.en;
+  const langSeg = h("div", { class: "seg small" }, ...["en", "da"].map((l) => h("button", {
+    type: "button", class: recapLang() === l ? "active" : "", onclick: () => { store.set("recapLang", l); recapData = null; recapFor = ""; loadRecap(); },
+  }, l === "en" ? "🇬🇧 EN" : "🇩🇰 DA")));
+  const head = h("div", { class: "rc-head" }, h("b", {}, t.title), langSeg);
+  if (!recapData) {
+    el.replaceChildren(head, h("p", { class: "muted" }, t.intro), h("button", { class: "primary", type: "button", onclick: async () => {
+      try { recapData = await api(`/api/games/${game.id}/recap`, { method: "POST", body: JSON.stringify({ lang: recapLang() }) }); } catch (e) { alert(e.message); return; }
+      recapFor = `${game.id}:${recapLang()}`; renderRecap(true); setTimeout(loadRecap, 1500);
+    } }, t.start));
+    return;
+  }
+  const items = [head];
+  const moves = recapData.moves || [];
+  const ready = moves.filter(Boolean).length;
+  if (recapData.status === "running") items.push(h("div", { class: "rc-progress" },
+    h("div", { class: "bar" }, h("i", { style: `width:${Math.round((100 * ready) / (recapData.total || 1))}%` })),
+    h("span", { class: "muted" }, `${t.working} ${ready} ${t.of} ${recapData.total}…`)));
+  if (recapData.summary) {
+    const c = recapData.counts || {};
+    items.push(h("div", { class: "rc-card rc-summary" }, h("div", { class: "rc-title" }, `🏁 ${t.summary}`),
+      h("div", { class: "rc-text" }, recapData.summary),
+      h("div", { class: "rc-counts" }, ...["white", "black"].filter((s) => c[s]).map((s) =>
+        h("div", {}, avatar(s), h("b", {}, game[s].label), " ", t.counts(c[s]))))));
+  }
+  items.push(h("div", { class: "muted small rc-hint" }, t.click));
+  moves.forEach((e, i) => {
+    if (!e) return;
+    const moveNo = `${Math.floor(i / 2) + 1}${e.side === "white" ? "." : "…"}`;
+    const [sym, cls] = CLS[e.cls] || ["", ""];
+    items.push(h("div", {
+      class: `rc-card move ${cls}${cur === i ? " cur" : ""}${recapData.turning?.includes(i) ? " turning" : ""}`, "data-ply": i,
+      onclick: () => { setView(i); },
+    },
+      h("div", { class: "rc-title" }, avatar(e.side), h("span", { class: "chip" }, `${moveNo} ${e.san}`),
+        h("span", { class: `badge q-${cls}` }, `${sym} ${cls}`), e.better ? h("span", { class: "muted" }, `${t.better}: ${e.better}`) : null),
+      h("div", { class: "rc-text" }, e.text || "…")));
+  });
+  el.replaceChildren(...items);
+  $(".rc-card.move.cur", el)?.scrollIntoView({ block: "nearest" });
+}
+
 function setTab(tab) {
   store.set("infoTab", tab);
   $$(".tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
@@ -906,8 +987,10 @@ function setTab(tab) {
   if (game) renderReact();
   $("#log").hidden = tab !== "log";
   $("#teach").hidden = tab !== "teach";
+  $("#recap").hidden = tab !== "recap";
   $("#teach-controls").dataset.game = "";
-  if (tab === "chat") renderChat(true); else if (tab === "teach") renderTeach(true); else renderLog(true);
+  if (tab === "chat") renderChat(true); else if (tab === "teach") renderTeach(true);
+  else if (tab === "recap") { renderRecap(true); loadRecap(); } else renderLog(true);
 }
 
 function renderGameLang() {
@@ -919,6 +1002,7 @@ function renderGameLang() {
 
 function renderAll() {
   renderGameLang();
+  renderRecap();
   renderBoard();
   renderBars();
   renderStatus();
@@ -966,7 +1050,7 @@ async function poll(force = false) {
       const answers = (x) => x.log.filter((e) => e.kind === "teach" && (e.reply_to || e.kind_detail === "hint")).length;
       teachPending = Math.max(0, teachPending - (answers(s) - answers(prev)));
     }
-    if (first) { selectedTeach = null; selectedChat = null; teachPending = 0; }
+    if (first) { selectedTeach = null; selectedChat = null; teachPending = 0; recapData = null; recapFor = ""; recapSig = ""; }
     game = s;
     if (first && s.learning) setTab("teach");
     else if (first && store.get("infoTab", "chat") === "teach" && !s.learning) setTab("chat");
@@ -1028,7 +1112,9 @@ async function renderGames() {
       h("td", { class: "res" }, g.result, g.learning ? h("span", { class: "pill learn", title: "Learning game (not rated)" }, "🎓") : null), h("td", {}, g.plies),
       h("td", {}, h("span", { class: `pill ${g.status}` }, g.status)),
       h("td", { class: "muted", title: g.termination || "" }, g.termination || ""),
-      h("td", {}, g.status === "hibernated" ? h("button", {
+      h("td", {}, g.status === "finished" && g.plies ? h("button", {
+        class: "resume", title: "Recap", onclick: async (e) => { e.stopPropagation(); await openGame(g.id); setTab("recap"); },
+      }, "📖") : null, g.status === "hibernated" ? h("button", {
         class: "resume", onclick: async (e) => { e.stopPropagation(); await resumeGame(g.id); },
       }, "▶ Resume") : null, ["finished", "aborted", "error", "hibernated"].includes(g.status) ? h("button", {
         onclick: async (e) => { e.stopPropagation(); if (confirm("Delete this game?")) { await api(`/api/games/${g.id}`, { method: "DELETE" }); renderGames(); } },

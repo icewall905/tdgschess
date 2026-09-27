@@ -447,3 +447,33 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .pill.hibernated { color: var(--accent2); background: color-mix(in srgb, var(--accent2) 12%, transparent); border-color: transparent; }
 .tbl button.resume { color: var(--good); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); margin-right: 4px; }
 .status .resume-big { width: auto; margin-top: 10px; padding: 9px 18px; }
+
+/* ------------------------------------------------------------ recap */
+.recap { flex: 1; overflow-y: auto; min-height: 160px; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.recap[hidden] { display: none; }
+.recap .rc-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.recap .rc-head b { font-size: 15px; }
+.recap .primary { width: auto; align-self: flex-start; }
+.recap .rc-progress { display: grid; gap: 4px; }
+.recap .rc-progress .bar { height: 8px; border-radius: 999px; background: var(--bg2); overflow: hidden; }
+.recap .rc-progress .bar i { display: block; height: 100%; background: linear-gradient(90deg, var(--accent), var(--accent2)); transition: width .4s; }
+.recap .rc-card { background: var(--card2); border: 1px solid var(--line); border-left: 4px solid var(--line2); border-radius: 12px; padding: 10px 12px; }
+.recap .rc-card.move { cursor: pointer; }
+.recap .rc-card.move:hover { border-color: var(--line2); }
+.recap .rc-card.cur { box-shadow: 0 0 0 2px var(--accent); }
+.recap .rc-card.best { border-left-color: var(--good); } .recap .rc-card.good { border-left-color: color-mix(in srgb, var(--good) 45%, var(--line2)); }
+.recap .rc-card.inaccuracy { border-left-color: var(--warn); } .recap .rc-card.mistake { border-left-color: #f97316; }
+.recap .rc-card.blunder { border-left-color: var(--bad); background: color-mix(in srgb, var(--bad) 6%, var(--card2)); }
+.recap .rc-card.turning .rc-title::after { content: "⚡ turning point"; font-size: 11px; font-weight: 800; color: var(--accent2); margin-left: auto; }
+.recap .rc-summary { border-left-color: var(--accent); background: color-mix(in srgb, var(--accent) 6%, var(--card2)); }
+.recap .rc-title { display: flex; align-items: center; gap: 8px; font-weight: 800; margin-bottom: 6px; flex-wrap: wrap; }
+.recap .rc-title .av { width: 24px; height: 24px; border-width: 1px; }
+.recap .chip { background: var(--bg2); border-radius: 7px; padding: 1px 8px; }
+.recap .badge { font-size: 11.5px; font-weight: 800; border-radius: 999px; padding: 1px 8px; background: var(--bg2); text-transform: capitalize; }
+.recap .badge.q-best { color: var(--good); } .recap .badge.q-good { color: color-mix(in srgb, var(--good) 70%, var(--muted)); }
+.recap .badge.q-inaccuracy { color: var(--warn); } .recap .badge.q-mistake { color: #f97316; } .recap .badge.q-blunder { color: var(--bad); }
+.recap .rc-text { white-space: pre-wrap; line-height: 1.5; font-size: 14.5px; }
+.recap .rc-counts { display: grid; gap: 4px; margin-top: 8px; font-size: 12.5px; }
+.recap .rc-counts > div { display: flex; align-items: center; gap: 6px; }
+.recap .rc-counts .av { width: 22px; height: 22px; border-width: 1px; }
+.recap .rc-hint { text-align: center; }
