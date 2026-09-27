@@ -1,4 +1,4 @@
-# Chess Arena
+# TDGS Chess
 
 Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / LLM / Stockfish / Lc0 in any combination.
 

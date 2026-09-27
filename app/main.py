@@ -1,4 +1,4 @@
-"""Chess Arena: humans, LLMs (OpenAI-compatible endpoints) and UCI engines playing each other."""
+"""TDGS Chess: humans, LLMs (OpenAI-compatible endpoints) and UCI engines playing each other."""
 
 import asyncio
 import json
@@ -632,7 +632,7 @@ class Game:
 
     def pgn(self) -> str:
         g = chess.pgn.Game.from_board(self.board)
-        g.headers.update(Event="Chess Arena", Site="local", White=self.white.label(),
+        g.headers.update(Event="TDGS Chess", Site="local", White=self.white.label(),
                          Black=self.black.label(), Result=self.result,
                          Date=time.strftime("%Y.%m.%d", time.localtime(self.created)))
         if self.termination:
@@ -751,7 +751,7 @@ async def run_match(games: list[Game]):
 
 # ---------------------------------------------------------------- api
 
-app = FastAPI(title="Chess Arena")
+app = FastAPI(title="TDGS Chess")
 STATIC = Path(__file__).parent / "static"
 
 
