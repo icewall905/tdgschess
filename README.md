@@ -101,7 +101,9 @@ one ANGLE picked (weighted) from what Stockfish says actually happened — admit
 other player's mistake, react to a capture, tease a check or an attacked piece, worry about a threat, cheeky
 confidence or a comeback — plus the last 3 lines to avoid repeats. Praise only for moves the engine rates good
 or best; the opening is named once (and again when it changes). The commentator skips about half of the moves
-where nothing notable happened. Danish messages get the Danish piece names. Worn-out phrases
+where nothing notable happened. Danish messages get the Danish piece names and no English words. A style guard
+lists the openers, phrases and emojis of the last 6 lines ("don't start with Hov", "already used: skabe kaos"),
+and a draft that still starts like a recent line or reuses a phrase is rewritten once (`talk()`). Worn-out phrases
 ("super strong move", "Godt spillet", "Wow"...) are banned. When the game ends, every talking LLM sends a closing
 message: a good-game in character, the turning point (largest eval swing) and one tip. Hint answers list the
 computer's reply to each suggested move, so questions like "won't you just take my rook?" get a true answer.

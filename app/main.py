@@ -888,6 +888,85 @@ async def chat_context(board: chess.Board, color: bool) -> list[str]:
     return facts
 
 
+EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF\u2600-\u27BF\u2B00-\u2BFF]")
+WORD_RE = re.compile(r"[^\W\d_]+", re.U)
+STOP = set("the a an and to of in is it my your you i me we og at en et er det din min mig du jeg den til på for med så nu "
+           "har kan skal vil ikke men om som".split())
+
+
+def recent_lines(game, side: str, n: int = 6) -> list[str]:
+    return [e["say"] for e in game.log if e.get("side") == side and e.get("say") and e.get("kind") != "ask"][-n:]
+
+
+def first_word(text: str) -> str:
+    words = WORD_RE.findall(text.lower())
+    return words[0] if words else ""
+
+
+def phrases(text: str) -> set[tuple]:
+    words = WORD_RE.findall(text.lower())
+    return {tuple(words[i:i + 3]) for i in range(len(words) - 2) if sum(w not in STOP for w in words[i:i + 3]) >= 2}
+
+
+def style_guard(game, side: str) -> list[str]:
+    """Tell the model exactly what it has been repeating: openers, phrases and emojis of its last lines."""
+    lines = recent_lines(game, side)
+    if not lines:
+        return []
+    out = []
+    starts = sorted({first_word(l) for l in lines[-4:] if first_word(l)})
+    if starts:
+        out.append("Your recent messages started with: " + ", ".join(f'"{w}"' for w in starts) + " - start differently")
+    counts: dict = {}
+    for l in lines:
+        for ph in phrases(l):
+            counts[ph] = counts.get(ph, 0) + 1
+    used = [" ".join(ph) for ph, _ in sorted(counts.items(), key=lambda x: -x[1])[:8]]
+    if used:
+        out.append("Phrases you already used - do NOT use them again: " + "; ".join(f'"{u}"' for u in used))
+    emojis = sorted({e for l in lines[-3:] for e in EMOJI_RE.findall(l)})
+    if emojis:
+        out.append(f"Emojis you just used: {' '.join(emojis)} - pick different ones, or none")
+    return out
+
+
+def too_similar(text: str, lines: list[str]) -> bool:
+    if not lines:
+        return False
+    fw = first_word(text)
+    if fw and fw in {first_word(l) for l in lines[-3:]}:
+        return True
+    mine = phrases(text)
+    return any(mine & phrases(l) for l in lines[-4:])
+
+
+async def talk(base: str, body: dict, lines: list[str]) -> Optional[str]:
+    """One chat line from the LLM; if it sounds like a recent line, ask once more for something different."""
+    text = ""
+    async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
+        for attempt in range(2):
+            try:
+                r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
+                                      headers={"Authorization": f"Bearer {API_KEY}"})
+                r.raise_for_status()
+                draft = r.json()["choices"][0]["message"].get("content") or ""
+            except Exception:
+                return text or None
+            draft = THINK_RE.sub("", draft).strip()
+            draft = re.sub(r"^\s*(SAY|MOVE)\s*[:：]\s*", "", draft, flags=re.I).strip().strip("\"'`*").strip()
+            if not draft:
+                continue
+            text = draft
+            if not too_similar(draft, lines):
+                break
+            body = {**body, "temperature": 1.0, "messages": body["messages"] + [
+                {"role": "assistant", "content": draft},
+                {"role": "user", "content": "That sounds too much like your earlier messages (same start or the same "
+                                            "phrases). Write a completely different message: different first word, "
+                                            "different words, different idea. Reply with only the message."}]}
+    return text or None
+
+
 async def chat_insight(game, side: str, board: chess.Board, own: Optional[chess.Move] = None,
                        optional: bool = False) -> Optional[list[str]]:
     """Facts for a chat line plus one ANGLE picked from what actually happened, so messages vary like a real
@@ -957,9 +1036,7 @@ async def chat_insight(game, side: str, board: chess.Board, own: Optional[chess.
     weight, angle = random.choices(angles, [w * w for w, _ in angles])[0]
     if optional and weight <= 2 and random.random() < 0.5:
         return None  # nothing notable happened: a real opponent doesn't talk after every move either
-    recent = [e["say"] for e in game.log if e.get("side") == side and e.get("say") and e.get("kind") != "ask"][-3:]
-    if recent:
-        facts.append("Your recent lines (say something different): " + " | ".join(recent))
+    facts += style_guard(game, side)
     facts.append(f"ANGLE for this message: {angle}")
     return facts
 
@@ -1038,7 +1115,8 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
             helping = f"\n\nFacts for the player {opp.label()} (only use if they ask for help):\n" + coach.facts_text(a, opp.label())
         except Exception:
             pass
-    user = ("Chess facts (from Stockfish, from your side):\n" + "\n".join(f"- {f}" for f in facts) + helping
+    guard = style_guard(game, side)
+    user = ("Chess facts (from Stockfish, from your side):\n" + "\n".join(f"- {f}" for f in facts + guard) + helping
             + f"\n\nRecent chat:\n{history}\n\nNew messages to answer:\n" + "\n".join(f"- {m}" for m in unread)
             + ("\n\nThey want to understand WHY. Explain it like to a child, in 4-5 short, simple sentences: the move "
                "to play, what it concretely does (from 'why it is good' - a picture they can see on the board), what "
@@ -1052,16 +1130,7 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
             "messages": [{"role": "system", "content": CHAT_REPLY_PROMPT.format(
                 persona=persona, color="White" if color else "Black", lang=chat_lang_line(game))},
                 {"role": "user", "content": user}]}
-    try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
-            r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
-                                  headers={"Authorization": f"Bearer {API_KEY}"})
-            r.raise_for_status()
-            text = r.json()["choices"][0]["message"].get("content") or ""
-    except Exception:
-        return
-    text = THINK_RE.sub("", text).strip()
-    text = re.sub(r"^\s*(SAY|MOVE)\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
+    text = await talk(base, body, recent_lines(game, side))
     if text:
         game.add_log({"ply": len(game.board.move_stack), "side": side, "kind": "chat", "bot": True,
                       "say": text[:900], "arrows": arrows, "t": time.time()})
@@ -1070,7 +1139,8 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
 CLOSING_PROMPT = """You are {persona}, and a chess game you played as {color} against {opp} just ended. Write the \
 closing message a friendly human opponent would say (2-3 short sentences): a warm "good game" that fits the \
 result (congratulate them if they won, be a good sport; if you won, be kind and encouraging), what decided the \
-game (the key moment from the facts), and ONE concrete tip they can use next time. Only name moves that appear in \
+game (the key moment from the facts), and ONE concrete tip that fits the result: if they won, name what worked or \
+a next step to get even better; if they lost, what to watch for next time. Only name moves that appear in \
 the facts - never invent moves. In character, kid-friendly, at most two emojis. Reply with only the message. {lang}"""
 
 
@@ -1158,7 +1228,9 @@ def chat_lang_line(game) -> str:
     if getattr(game, "opts", None) and game.opts.lang == "da":
         return ("Write the chat message in Danish (dansk), with the right Danish chess words: bonde (pawn), springer "
                 "(knight), løber (bishop), tårn (rook), dronning (queen), konge (king), skak (check), skakmat "
-                "(checkmate), rokade (castling). Any MOVE line stays in standard English chess notation.")
+                "(checkmate), rokade (castling). Only Danish words: no English words, no English words in "
+                "parentheses, no English exclamations like Uh-oh, Whoa, Wow or Oops. Any MOVE line stays in "
+                "standard English chess notation.")
     return "Write the chat message in English."
 
 
@@ -1235,18 +1307,8 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
             return
         if extra:
             body["messages"][1]["content"] += "\nChat facts (from Stockfish):\n" + "\n".join(f"- {f}" for f in extra)
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
-                r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
-                                      headers={"Authorization": f"Bearer {API_KEY}"})
-                r.raise_for_status()
-                text = r.json()["choices"][0]["message"].get("content") or ""
-        except Exception:
-            return
-        text = THINK_RE.sub("", text).strip()
-        text = re.sub(r"^\s*SAY\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
-        recent = [e["say"] for e in game.log if e.get("side") == side and e.get("say")][-3:]
-        if text and text not in recent:  # two comments written at once can come out identical
+        text = await talk(base, body, recent_lines(game, side))
+        if text and text not in recent_lines(game, side, 3):  # two comments written at once can come out identical
             game.add_log({"ply": ply, "side": side, "move": board.san(mv), "say": text[:300], "kind": "comment"})
 
     old = game.comment_tasks.get(side)
