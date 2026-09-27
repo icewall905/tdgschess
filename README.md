@@ -51,6 +51,9 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   the game (off-topic questions get a friendly redirect) and teach one Stockfish fact: opening, plan, threat,
   why a move was good or a mistake. Asked for help ("what should I do?"), they give a hint from the player's own
   Stockfish facts and explain why it works, so the player learns the idea; unasked, they don't give moves away.
+- Thinking: LLM players run with the model's reasoning mode off (`enable_thinking: false`) — with Stockfish
+  hints it isn't needed, and Gemma 12B took 9-22 s and often lost its chat line to the token budget (2.8 s
+  off). "🧠 Let it think" turns it on (rated separately, "…, think").
 - Pure LLM toggle: no Stockfish hints/overview (legal-move list on); rated separately as "…, pure".
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's

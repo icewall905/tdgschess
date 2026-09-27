@@ -180,6 +180,7 @@ class PlayerSpec(BaseModel):
     show_legal: bool = False  # the Stockfish hints below are a clearer shortlist; turn on when hints are off
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
     engine_hints: bool = True  # legacy field
+    think: bool = False  # llm: allow the model's reasoning mode (much slower; Stockfish hints do the analysis anyway)
     pure: bool = False  # llm: no Stockfish hints / overview (the model's own chess); rated separately as "pure"
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
@@ -743,7 +744,8 @@ class LLMPlayer:
                     "messages": messages,
                     "temperature": self.spec.temperature,
                     "max_tokens": self.spec.max_tokens,
-                    **self.spec.extra,
+                    "chat_template_kwargs": {"enable_thinking": self.spec.think},
+                    **self.spec.extra,  # e.g. its own chat_template_kwargs override the above
                 }
                 t0 = time.time()
                 entry = {"ply": len(board.move_stack), "side": side, "attempt": attempt + 1}
@@ -1566,7 +1568,8 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
         apply_profile(spec)
         if spec.type == "llm" and spec.endpoint and spec.model:
-            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model) + (" · pure" if spec.pure else "")
+            spec.rating_key = (await resolve_model_key(spec.endpoint, spec.model) + (" · pure" if spec.pure else "")
+                               + (" · think" if spec.think else ""))
         if spec.type == "human" and not spec.remote:
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):

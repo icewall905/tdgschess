@@ -164,6 +164,7 @@ function renderSide(side) {
         h("label", {}, "Max tokens", h("input", { type: "number", step: "256", value: s.max_tokens, oninput: upd("max_tokens", num) }))),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.show_legal, onchange: upd("show_legal") }), "Give legal move list in prompt"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.hints ?? true, onchange: upd("hints") }), "Give position facts (material, hanging pieces, checks, captures)"),
+      h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.think, onchange: upd("think") }), "🧠 Let it think (slower, rated separately)"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.pure, onchange: (e) => {
         s.pure = e.target.checked;
         s.show_legal = s.pure;  // without the engine's shortlist the legal-move list helps small models
