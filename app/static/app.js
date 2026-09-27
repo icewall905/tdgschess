@@ -364,7 +364,7 @@ const ARROW_COLORS = { green: "rgba(21,140,40,.78)", red: "rgba(220,40,40,.8)", 
 let selectedTeach = null;
 function boardMarks(ply) {
   const out = { arrows: [], squares: [] };
-  if (!game?.learning) return out;
+  if (!game?.learning || !$("#teach-arrows").checked) return out;
   let src = null;
   if (game.review && ply === game.san.length) src = game.review;
   else if (selectedTeach != null) src = game.log[selectedTeach];
@@ -1204,6 +1204,7 @@ $$("#teach-lang button").forEach((b) => { b.onclick = async () => {
   try { await api(`/api/games/${game.id}/lang`, { method: "POST", body: JSON.stringify({ lang: b.dataset.lang }) }); } catch (e) { alert(e.message); }
   poll(true);
 }; });
+$("#teach-arrows").onchange = () => { store.set("teachArrows", $("#teach-arrows").checked); renderBoard(); };
 $("#teach").addEventListener("scroll", () => { const el = $("#teach"); teachStick = el.scrollHeight - el.scrollTop - el.clientHeight < 60; });
 $("#chat").addEventListener("scroll", () => {
   const el = $("#chat");
@@ -1243,6 +1244,7 @@ document.addEventListener("keydown", (e) => {
   $("#sound").checked = store.get("sound", true);
   $("#show-reasoning").checked = store.get("showReasoning", false);
   $("#speak").checked = store.get("speak", false);
+  $("#teach-arrows").checked = store.get("teachArrows", true);
   setTheme(store.get("theme", null));
   if (store.get("setupCollapsed", false)) collapseSetup(true);
   setTab(store.get("infoTab", "chat"));

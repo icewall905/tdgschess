@@ -37,7 +37,8 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   what it allows, forks, missed mates, better moves). A blunder pauses the game before the engine replies and
   shows arrows (red = the move, orange = the punishment, green = better moves) with "Take it back" / "Keep it".
   The Teacher tab has 💡 Hint (engine-backed suggestions with arrows), ❓ Explain, and free questions — moves the
-  kid mentions ("what if Nf3?", Danish letters too) are checked by Stockfish first. Learning games don't change
+  kid mentions ("what if Nf3?", Danish letters too) are checked by Stockfish first. A "🏹 arrows" switch in the
+  Teacher tab turns the board arrows/highlights on or off (remembered per device). Learning games don't change
   ratings and are left out of Standings.
 - Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments and the teacher
   (the teacher can also switch mid-game).
@@ -73,6 +74,10 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
 cp .env.example .env              # first time: set your endpoints / key
 docker compose up -d --build     # after editing app/ or .env
 ```
+
+Stockfish processes (each game's opponent, and the shared eval-bar, LLM-hint and teacher engines) start on
+demand and shut down after `ENGINE_IDLE` seconds (default 300) without use, so games waiting for a human don't
+hold memory; the next move restarts them. The container is limited to 3 GB.
 
 Autostart (systemd): `docker-compose-chess-arena.service`. Everything runs on the CPU — no GPU needed.
 

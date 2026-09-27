@@ -246,22 +246,66 @@ class SayReq(BaseModel):
 
 # ---------------------------------------------------------------- analysis
 
+ENGINE_IDLE = float(os.environ.get("ENGINE_IDLE", "300"))  # seconds without use before a Stockfish is shut down
+
+
+class LazyEngine:
+    """A Stockfish process started on demand and shut down after ENGINE_IDLE seconds without use, so games left
+    waiting for a human (and idle shared engines) don't hold memory. Restarts transparently, same options."""
+
+    def __init__(self, options: dict):
+        self.options = options
+        self.engine = None
+        self.idle_task: Optional[asyncio.Task] = None
+
+    async def acquire(self):
+        if self.idle_task:
+            self.idle_task.cancel()
+            self.idle_task = None
+        if self.engine is not None and self.engine.returncode.done():
+            self.engine = None
+        if self.engine is None:
+            _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
+            await self.engine.configure(self.options)
+        return self.engine
+
+    def release(self):
+        if self.idle_task:
+            self.idle_task.cancel()
+        self.idle_task = asyncio.create_task(self._close_later())
+
+    async def _close_later(self):
+        await asyncio.sleep(ENGINE_IDLE)
+        self.idle_task = None
+        await self.close()
+
+    async def close(self):
+        if self.idle_task:
+            self.idle_task.cancel()
+            self.idle_task = None
+        engine, self.engine = self.engine, None
+        if engine:
+            try:
+                await asyncio.wait_for(engine.quit(), 5)
+            except Exception:
+                pass
+
+
 class Analyzer:
     """One shared Stockfish used only for the eval bar."""
 
     def __init__(self):
-        self.engine = None
+        self.lazy = LazyEngine({"Threads": 2, "Hash": 32})
         self.lock = asyncio.Lock()
 
     async def evaluate(self, board: chess.Board):
         async with self.lock:
             try:
-                if self.engine is None:
-                    _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 32})
-                info = await self.engine.analyse(board, chess.engine.Limit(time=0.25))
+                engine = await self.lazy.acquire()
+                info = await engine.analyse(board, chess.engine.Limit(time=0.25))
+                self.lazy.release()
             except Exception:
-                self.engine = None
+                await self.lazy.close()
                 return None
         score = info["score"].white()
         best = info.get("pv", [None])[0]
@@ -282,19 +326,18 @@ class Advisor:
     """Stockfish's top moves for LLM players with engine hints (separate from the eval-bar engine)."""
 
     def __init__(self):
-        self.engine = None
+        self.lazy = LazyEngine({"Threads": 2, "Hash": 32})
         self.lock = asyncio.Lock()
 
     async def top_moves(self, board: chess.Board, n: int = 3, depth: int = HINT_DEPTH) -> list[dict]:
         async with self.lock:
             try:
-                if self.engine is None:
-                    _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 32})
-                infos = await self.engine.analyse(board, chess.engine.Limit(depth=depth),
-                                                  multipv=min(n, board.legal_moves.count()))
+                engine = await self.lazy.acquire()
+                infos = await engine.analyse(board, chess.engine.Limit(depth=depth),
+                                             multipv=min(n, board.legal_moves.count()))
+                self.lazy.release()
             except Exception:
-                self.engine = None
+                await self.lazy.close()
                 return []
         out = []
         for info in infos:
@@ -847,22 +890,26 @@ class StockfishPlayer:
         self.spec, self.color, self.game = spec, color, game
         self.side = "white" if color else "black"
         self.engine = None
+        opts = {"Threads": 2, "Hash": 32}
+        if spec.elo >= 1320 and not spec.auto:
+            opts.update(UCI_LimitStrength=True, UCI_Elo=min(3190, spec.elo))
+        self.lazy = LazyEngine(opts)  # hibernates while the game waits for a human
 
     async def start(self):
-        _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-        opts = {"Threads": 2, "Hash": 32}
-        if self.spec.elo >= 1320 and not self.spec.auto:
-            opts.update(UCI_LimitStrength=True, UCI_Elo=min(3190, self.spec.elo))
-        await self.engine.configure(opts)
+        await self.lazy.acquire()  # fail early if Stockfish can't start
+        self.lazy.release()
 
     async def close(self):
-        if self.engine:
-            try:
-                await asyncio.wait_for(self.engine.quit(), 5)
-            except Exception:
-                pass
+        await self.lazy.close()
 
     async def choose(self, board: chess.Board) -> chess.Move:
+        self.engine = await self.lazy.acquire()
+        try:
+            return await self._choose(board)
+        finally:
+            self.lazy.release()
+
+    async def _choose(self, board: chess.Board) -> chess.Move:
         t0 = time.time()
         if self.spec.auto:
             mv = await self.weak_move(board, self.game.auto_target(self.color), soften_ok=True)

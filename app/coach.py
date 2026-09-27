@@ -73,7 +73,7 @@ class CoachEngine:
     """Its own Stockfish (full strength) for learning mode; one shared process, calls queue on a lock."""
 
     def __init__(self):
-        self.engine = None
+        self.lazy = None  # main.LazyEngine, created on first use (main imports this module)
         self.lock = asyncio.Lock()
 
     async def top(self, board: chess.Board, n: int = 3, seconds: float = ANALYSE_SECONDS) -> list[dict]:
@@ -81,14 +81,14 @@ class CoachEngine:
         if board.is_game_over():
             return []
         async with self.lock:
+            self.lazy = self.lazy or main().LazyEngine({"Threads": 2, "Hash": 32})
             try:
-                if self.engine is None:
-                    _, self.engine = await chess.engine.popen_uci(main().STOCKFISH_PATH)
-                    await self.engine.configure({"Threads": 2, "Hash": 32})
-                infos = await self.engine.analyse(board, chess.engine.Limit(time=seconds),
-                                                  multipv=min(n, board.legal_moves.count()))
+                engine = await self.lazy.acquire()
+                infos = await engine.analyse(board, chess.engine.Limit(time=seconds),
+                                             multipv=min(n, board.legal_moves.count()))
+                self.lazy.release()
             except Exception:
-                self.engine = None
+                await self.lazy.close()
                 return []
         out = []
         for info in infos:
