@@ -18,6 +18,8 @@ VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.
 NAMES = {chess.PAWN: "pawn", chess.KNIGHT: "knight", chess.BISHOP: "bishop", chess.ROOK: "rook",
          chess.QUEEN: "queen", chess.KING: "king"}
 BLUNDER, MISTAKE, INACCURACY = 0.30, 0.18, 0.10  # win-probability loss, same thresholds as the move list marks
+CP_BLUNDER, CP_MISTAKE, CP_INACCURACY = 300, 150, 70  # centipawn loss: catches giving away a queen in a won game
+CP_CAP = 3000  # mates and huge scores count as this much (high enough that losing a queen still counts)
 ANALYSE_SECONDS = 0.3  # grading moves (good / mistake / blunder)
 ADVICE_SECONDS = 0.5  # the advice itself (hints, questions, best moves): same as the eval bar's hint arrow
 
@@ -280,9 +282,13 @@ async def review(board: chess.Board, move: chess.Move, color: bool) -> dict:
     else:
         a_cp, a_mate = 0, None  # stalemate / draw
     loss = max(0.0, win_frac(b_cp, b_mate) - win_frac(a_cp, a_mate))
+    # material/score lost too: win chances hardly move once a game is decided, but a lost queen is still a blunder
+    clamp = lambda cp, mate: CP_CAP if (mate or 0) > 0 else -CP_CAP if mate else max(-CP_CAP, min(CP_CAP, cp or 0))
+    cp_loss = max(0, clamp(b_cp, b_mate) - clamp(a_cp, a_mate))
     is_best = bool(best) and best[0]["move"] == move
-    cls = ("best" if is_best else "blunder" if loss >= BLUNDER else "mistake" if loss >= MISTAKE
-           else "inaccuracy" if loss >= INACCURACY else "good")
+    rank = lambda l, c: 3 if l >= BLUNDER or c >= CP_BLUNDER else 2 if l >= MISTAKE or c >= CP_MISTAKE \
+        else 1 if l >= INACCURACY or c >= CP_INACCURACY else 0
+    cls = "best" if is_best else ("good", "inaccuracy", "mistake", "blunder")[rank(loss, cp_loss)]
 
     motifs, squares = [], []
     lost = [d for d in in_danger(after, color, 3)]
