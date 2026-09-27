@@ -39,10 +39,10 @@ const playerAvatar = (side, p) => {
   const emoji = p?.profile && (profileById(p.profile)?.emoji);
   return emoji ? h("span", { class: `av emoji ${side}` }, emoji) : avatar(side);
 };
-const TYPES = { human: ["🧒", "Human"], llm: ["🤖", "LLM"], stockfish: ["🐟", "Stockfish"], lc0: ["🦁", "Lc0"] };
+const TYPES = { human: ["🧒", "Human"], llm: ["🤖", "LLM"], stockfish: ["🐟", "Stockfish"], lc0: ["🦁", "Lc0"] };  // lc0: old games only
 const pieceImg = (p) => `/static/pieces/${p === p.toUpperCase() ? "w" : "b"}${p.toUpperCase()}.svg`;
 
-let config = { endpoints: [], lc0: false };
+let config = { endpoints: [] };
 let game = null;          // full state of the displayed game
 let currentId = store.get("currentId", null);
 let viewPly = null;       // null = follow live
@@ -57,9 +57,9 @@ const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
   llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
   stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
-  lc0: { type: "lc0", nodes: 0, movetime: 3, commentary: false, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
+for (const side of ["white", "black"]) if (!DEFAULTS[setup[side]?.type]) setup[side] = { ...DEFAULTS.stockfish };  // Lc0 was removed
 
 function firstModel(idx = 0) {
   const online = config.endpoints.filter((e) => e.online && e.models?.length);
@@ -103,7 +103,7 @@ function renderSide(side) {
   };
   const num = (v) => (v === "" ? 0 : Number(v));
   box.replaceChildren();
-  const types = ["human", "llm", "stockfish", ...(config.lc0 ? ["lc0"] : [])];
+  const types = ["human", "llm", "stockfish"];
   const typeSeg = h("div", { class: "type-seg", style: `--n:${types.length}` }, ...types.map((t) =>
     h("button", {
       class: s.type === t ? "active" : "", type: "button", title: TYPES[t][1],
@@ -183,11 +183,6 @@ function renderSide(side) {
       h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.1", min: "0.05", value: s.movetime, oninput: upd("movetime", num) })),
     );
     commentaryFields(s, side, box);
-  } else if (s.type === "lc0") {
-    s.nodes = 0;
-    box.append(h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.5", min: "0.5", value: s.movetime, oninput: upd("movetime", num) })),
-      h("div", { class: "hint" }, "Lc0 always plays at full strength; more time = stronger."));
-    commentaryFields(s, side, box);
   }
 }
 
@@ -196,8 +191,7 @@ function renderSetup() {
   renderSide("black");
   $("#endpoints").replaceChildren(h("div", {}, "Endpoints:"), ...config.endpoints.map((ep) =>
     h("div", {}, h("span", { class: "dot", style: `background:${ep.online ? "var(--good)" : "var(--bad)"}` }),
-      `${ep.name} — ${ep.url} ${ep.online ? `(${ep.models.length} model${ep.models.length === 1 ? "" : "s"})` : "(offline)"}`)),
-    h("div", {}, h("span", { class: "dot", style: `background:${config.lc0 ? "var(--good)" : "var(--muted)"}` }), config.lc0 ? "Lc0 configured" : "Lc0 not configured"));
+      `${ep.name} — ${ep.url} ${ep.online ? `(${ep.models.length} model${ep.models.length === 1 ? "" : "s"})` : "(offline)"}`)));
 }
 
 function applyPreset(p) {

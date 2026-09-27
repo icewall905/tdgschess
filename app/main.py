@@ -36,8 +36,6 @@ def parse_endpoints(raw: str) -> dict[str, str]:
 ENDPOINTS = parse_endpoints(os.environ.get("ENDPOINTS", ""))
 API_KEY = os.environ.get("LLM_API_KEY", "none")
 STOCKFISH_PATH = os.environ.get("STOCKFISH_PATH", "/usr/games/stockfish")
-LC0_UCI_TCP = os.environ.get("LC0_UCI_TCP", "")  # host:port of a UCI-over-TCP lc0 (socat)
-LC0_IDLE = float(os.environ.get("LC0_IDLE", "600"))  # seconds before the shared lc0 is closed (frees VRAM)
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 GAMES_DIR = DATA_DIR / "games"
 GAMES_DIR.mkdir(parents=True, exist_ok=True)
@@ -79,7 +77,7 @@ save_profiles()
 # ---------------------------------------------------------------- models
 
 class PlayerSpec(BaseModel):
-    type: Literal["human", "llm", "stockfish", "lc0"]
+    type: Literal["human", "llm", "stockfish"]
     name: Optional[str] = None
     # human
     profile: Optional[str] = None  # profile id; its name and rating are used
@@ -104,7 +102,6 @@ class PlayerSpec(BaseModel):
     comment_endpoint: Optional[str] = None
     comment_model: Optional[str] = None
     movetime: float = 0.5  # seconds per move
-    nodes: int = 0  # lc0: legacy (old games); Lc0 now always searches for `movetime`
     _seat: Optional[str] = PrivateAttr(default=None)  # client id of the device playing this human side
 
     def label(self) -> str:
@@ -116,8 +113,6 @@ class PlayerSpec(BaseModel):
             if self.auto:
                 return "Stockfish (auto)"
             return f"Stockfish ({self.elo} Elo)" if self.elo else "Stockfish (full)"
-        if self.type == "lc0":
-            return f"Lc0 ({self.nodes} nodes)" if self.nodes else f"Lc0 ({self.movetime:g}s)"
         return "Human"
 
 
@@ -179,69 +174,6 @@ class Analyzer:
 
 ANALYZER = Analyzer()
 
-
-class Lc0Pool:
-    """One shared lc0 connection for all games: each lc0 process holds ~1.3 GB of VRAM next to the
-    LLM, so parallel games queue on the lock instead of spawning more. Closed after LC0_IDLE seconds."""
-
-    def __init__(self):
-        self.engine = None
-        self.lock = asyncio.Lock()
-        self.idle_task = None
-
-    async def _connect(self):
-        # the engine side serves one connection at a time and re-listens between them, so retry briefly;
-        # a plain failure otherwise surfaces as a cryptic closed-transport error
-        for attempt in range(10):
-            try:
-                _, self.engine = await asyncio.wait_for(
-                    chess.engine.popen_uci(["socat", "-", f"TCP:{LC0_UCI_TCP}"]), 30)
-                return
-            except Exception as e:
-                err = e
-                await asyncio.sleep(0.5)
-        raise RuntimeError(f"Lc0 unreachable at {LC0_UCI_TCP} ({type(err).__name__}: {err}) — "
-                           "is ../lc0/chess-engine running, and is there enough free VRAM? (lc0 won't start "
-                           "with less than ~1.6 GB free — the LLM has priority)")
-
-    async def _drop(self):
-        if self.engine:
-            try:
-                await asyncio.wait_for(self.engine.quit(), 5)
-            except Exception:
-                pass
-        self.engine = None
-
-    async def _close_when_idle(self):
-        await asyncio.sleep(LC0_IDLE)
-        async with self.lock:
-            await self._drop()
-
-    async def play(self, board: chess.Board, limit: chess.engine.Limit, game_id: str) -> chess.Move:
-        async with self.lock:
-            if self.idle_task:
-                self.idle_task.cancel()
-            try:
-                if self.engine is not None and self.engine.returncode.done():
-                    self.engine = None  # engine side closed it (idle timeout / restart)
-                if self.engine is None:
-                    await self._connect()
-                # lc0 prints "error CUDA error: out of memory" and never answers, so don't wait forever
-                timeout = (limit.time or 0) * 3 + (limit.nodes or 0) / 20 + 60
-                try:
-                    res = await asyncio.wait_for(self.engine.play(board, limit, game=game_id), timeout)
-                except asyncio.TimeoutError:
-                    raise RuntimeError(f"Lc0 gave no move within {timeout:.0f}s "
-                                       "(out of GPU memory? see docker logs chess-engine-lc0-1)") from None
-            except BaseException:
-                await self._drop()
-                raise
-            finally:
-                self.idle_task = asyncio.create_task(self._close_when_idle())
-            return res.move
-
-
-LC0 = Lc0Pool()
 
 # ---------------------------------------------------------------- players
 
@@ -759,27 +691,6 @@ class StockfishPlayer:
         return random.choices([m for m, _ in cand], [math.exp((c - best) / T) for _, c in cand])[0]
 
 
-class Lc0Player:
-    def __init__(self, spec: PlayerSpec, color: bool, game: "Game"):
-        self.spec, self.color, self.game = spec, color, game
-        spec.nodes = 0
-
-    async def start(self):
-        if not LC0_UCI_TCP:
-            raise ValueError("LC0_UCI_TCP not configured")
-
-    async def close(self):
-        pass
-
-    async def choose(self, board: chess.Board) -> chess.Move:
-        limit = chess.engine.Limit(time=self.spec.movetime)  # full strength: as many nodes as the time allows
-        t0 = time.time()
-        mv = await LC0.play(board, limit, self.game.id)
-        self.game.stats["white" if self.color else "black"]["seconds"] += time.time() - t0
-        engine_comment(self.game, self.spec, self.color, board, mv)
-        return mv
-
-
 class HumanPlayer:
     def __init__(self, spec, color, game: "Game"):
         self.game = game
@@ -800,7 +711,7 @@ class HumanPlayer:
 
 
 def make_player(spec: PlayerSpec, color: bool, game):
-    return {"human": HumanPlayer, "llm": LLMPlayer, "stockfish": StockfishPlayer, "lc0": Lc0Player}[spec.type](spec, color, game)
+    return {"human": HumanPlayer, "llm": LLMPlayer, "stockfish": StockfishPlayer}[spec.type](spec, color, game)
 
 
 # ---------------------------------------------------------------- game
@@ -872,8 +783,6 @@ class Game:
                 e = self.engine_elo[side]
                 return sum(e) / len(e) if e else None
             return spec.elo or 3200
-        if spec.type == "lc0":
-            return 3000
         return None
 
     def apply_ratings(self):
@@ -1070,7 +979,6 @@ async def config():
     return {
         "endpoints": [{"name": n, "url": u, "models": m, "online": m is not None}
                       for (n, u), m in zip(ENDPOINTS.items(), results)],
-        "lc0": bool(LC0_UCI_TCP),
         "max_plies": MAX_PLIES,
     }
 
@@ -1098,8 +1006,6 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):
             raise HTTPException(400, "LLM players need an endpoint and a model")
-        if spec.type == "lc0" and not LC0_UCI_TCP:
-            raise HTTPException(400, "Lc0 is not configured (LC0_UCI_TCP)")
     if req.start_fen:
         try:
             chess.Board(req.start_fen)
@@ -1143,7 +1049,7 @@ def engine_settings(p: dict) -> str:
             return f"auto: {AUTO_BELOW} below a human's rating"
         elo = f"{p['elo']} Elo" if p.get("elo") else "full strength"
         return f"{elo} · {p.get('movetime', 0.5):g}s/move"
-    if p.get("type") == "lc0":
+    if p.get("type") == "lc0":  # games from before Lc0 was removed
         return f"{p['nodes']} nodes" if p.get("nodes") else f"{p.get('movetime', 1):g}s/move"
     return ""
 
