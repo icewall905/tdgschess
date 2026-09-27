@@ -45,8 +45,11 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   ratings and are left out of Standings.
 - Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments and the teacher
   (the teacher can also switch mid-game).
-- LLM chat replies: players' chat messages are answered by the LLM (or the engine's LLM commentator) once, in its
-  chat line with its next move — no extra calls, the game keeps moving.
+- LLM chat replies: when a player writes in the chat, the LLM players with chat on (and engines with an LLM
+  commentator) answer within a few seconds in a separate background call — the game never waits. A burst of
+  messages gets one reply; messages arriving while it types are answered once more afterwards. Replies stay on
+  the game (off-topic questions get a friendly redirect) and teach one Stockfish fact: opening, plan, threat,
+  why a move was good or a mistake.
 - Pure LLM toggle: no Stockfish hints/overview (legal-move list on); rated separately as "…, pure".
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's

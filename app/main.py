@@ -841,13 +841,15 @@ async def chat_context(board: chess.Board, color: bool) -> list[str]:
     if board.move_stack:
         prev = board.copy()
         last = prev.pop()
+        mine = prev.turn == color
         try:
             r = await coach.review(prev, last, prev.turn)
             verdict = {"best": "the best move", "good": "a good move", "inaccuracy": "a small inaccuracy",
                        "mistake": "a mistake", "blunder": "a big blunder"}[r["cls"]]
-            line = f"The opponent's last move {r['words']} was {verdict} (engine)"
+            whose = "Your" if mine else "The opponent's"
+            line = f"{whose} last move {r['words']} was {verdict} (engine)"
             if r["cls"] in ("mistake", "blunder") and r["reply"]:
-                line += f"; you can punish it with {r['reply']['words']}"
+                line += (f"; it allows {r['reply']['words']}" if mine else f"; you can punish it with {r['reply']['words']}")
             if r["motifs"]:
                 line += "; " + "; ".join(r["motifs"])
             facts.append(line)
@@ -856,6 +858,8 @@ async def chat_context(board: chess.Board, color: bool) -> list[str]:
     try:
         a = await coach.analyse(board, color)
         facts.append(f"The position for you: {a['eval']}")
+        if a.get("opponent_plan"):
+            facts.append(f"What Stockfish expects the opponent to play: {' '.join(a['opponent_plan'])}")
         if a["top"]:
             facts.append(f"Stockfish's plan for you: {' '.join(a['top'][0]['line'])} (starting with {a['top'][0]['words']})")
         if a["threat"]:
@@ -872,7 +876,83 @@ def unread_chat(game, side: str) -> list[str]:
     seen = game.chat_seen.get(side, 0)
     game.chat_seen[side] = len(game.log)
     return [f"{game.spec_for(e['side'] == 'white').label()}: {e['say']}"
-            for e in game.log[seen:] if e.get("kind") == "chat" and e.get("side") != side]
+            for e in game.log[seen:] if e.get("kind") == "chat" and e.get("side") != side and not e.get("bot")]
+
+
+def has_unread_chat(game, side: str) -> bool:
+    return any(e.get("kind") == "chat" and e.get("side") != side and not e.get("bot")
+               for e in game.log[game.chat_seen.get(side, 0):])
+
+
+CHAT_REPLY_PROMPT = """You are {persona}, playing {color} in a chess game that children are watching and playing. \
+A player just wrote in the game chat. Reply in 1-3 short sentences, kind and fun, in character.
+Always keep the conversation on THIS chess game: if they ask about something else, answer in a few friendly words \
+and bring it right back to the board. Be eager to teach: explain one real idea from the "Chess facts" (they come \
+from the Stockfish engine and are true) - the opening's name, a plan, a threat, why a move was good or a mistake. \
+Never invent moves or pieces that are not in the facts. Kid-friendly: never mean, scary or rude. {lang}"""
+
+
+def chat_responders(game) -> list[tuple[str, PlayerSpec]]:
+    """LLMs that talk in this game: LLM players with chat on, and engines with an LLM commentator."""
+    out = []
+    for side, sp in (("white", game.white), ("black", game.black)):
+        if (sp.type == "llm" and sp.chat and sp.endpoint and sp.model) or \
+                (sp.type == "stockfish" and sp.commentary and sp.comment_endpoint and sp.comment_model):
+            out.append((side, sp))
+    return out
+
+
+async def chat_reply(game, side: str, spec: PlayerSpec):
+    """Answer the players' chat right away (without waiting for the next move), about the game."""
+    color = side == "white"
+    board = game.board.copy()
+    facts = await chat_context(board, color)
+    unread = unread_chat(game, side)
+    if not unread:
+        return
+    convo = [e for e in game.log if e.get("kind") == "chat"][-8:]
+    history = "\n".join(f"{'You' if e.get('bot') and e['side'] == side else game.spec_for(e['side'] == 'white').label()}: {e['say']}"
+                        for e in convo)
+    endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
+    base = ENDPOINTS.get(endpoint or "", endpoint or "")
+    persona = spec.persona.strip() or "a cheerful chess buddy"
+    user = ("Chess facts (from Stockfish):\n" + "\n".join(f"- {f}" for f in facts)
+            + f"\n\nRecent chat:\n{history}\n\nNew messages to answer:\n" + "\n".join(f"- {m}" for m in unread)
+            + "\n\nReply with only your chat message.")
+    body = {"model": model, "temperature": 0.7, "max_tokens": 300,
+            "chat_template_kwargs": {"enable_thinking": False},
+            "messages": [{"role": "system", "content": CHAT_REPLY_PROMPT.format(
+                persona=persona, color="White" if color else "Black", lang=chat_lang_line(game))},
+                {"role": "user", "content": user}]}
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
+            r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
+                                  headers={"Authorization": f"Bearer {API_KEY}"})
+            r.raise_for_status()
+            text = r.json()["choices"][0]["message"].get("content") or ""
+    except Exception:
+        return
+    text = THINK_RE.sub("", text).strip()
+    text = re.sub(r"^\s*(SAY|MOVE)\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
+    if text:
+        game.add_log({"ply": len(game.board.move_stack), "side": side, "kind": "chat", "bot": True,
+                      "say": text[:400], "t": time.time()})
+
+
+def schedule_chat_replies(game):
+    """One reply task per talking LLM: waits a moment to gather a burst of messages, answers, and answers again
+    only if new messages arrived meanwhile."""
+    for side, spec in chat_responders(game):
+        task = game.reply_tasks.get(side)
+        if task and not task.done():
+            continue  # the running task picks up the new messages when it finishes
+
+        async def loop(side=side, spec=spec):
+            await asyncio.sleep(1.5)
+            while has_unread_chat(game, side):
+                await chat_reply(game, side, spec)
+
+        game.reply_tasks[side] = coach.background(loop())
 
 
 def chat_lang_line(game) -> str:
@@ -1097,7 +1177,8 @@ class Game:
         self.teach_task: Optional[asyncio.Task] = None  # learning: the running per-turn explanation
         self.teach_busy = False
         self.teach_kid: Optional[tuple] = None  # learner's last move, explained together with the reply
-        self.chat_seen: dict[str, int] = {}  # side -> log length when its LLM last read the players' chat
+        self.chat_seen: dict[str, int] = {}
+        self.reply_tasks: dict[str, asyncio.Task] = {}  # side -> log length when its LLM last read the players' chat
         self.review_decisions: asyncio.Queue = asyncio.Queue()
 
     def touch(self):
@@ -1793,6 +1874,7 @@ async def human_say(gid: str, req: SayReq, x_client_id: Optional[str] = Header(N
         raise HTTPException(403, "only players can chat")
     side = sides[0] if len(sides) == 1 else ("white" if g.board.turn else "black")
     g.add_log({"ply": len(g.board.move_stack), "side": side, "kind": "chat", "say": text, "t": time.time()})
+    schedule_chat_replies(g)
     return {"ok": True}
 
 

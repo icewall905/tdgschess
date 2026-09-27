@@ -748,7 +748,7 @@ function renderChat(force) {
       const e = chats[ci++];
       const key = `${game.id}:c${e.i}`;
       if (!spoken.has(key)) { spoken.add(key); if (!firstLoad) speak(e.say, e.side); }
-      items.push(bubble(e.side, game[e.side].label, null, e.say, "human"));
+      items.push(bubble(e.side, game[e.side].label, null, e.say, e.bot ? "reply" : "human"));
     }
   };
   const cur = shownPly();
