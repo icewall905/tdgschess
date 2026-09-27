@@ -272,6 +272,9 @@ Think it through in this order, briefly:
 4. Blunder check: for each candidate, find the opponent's best reply. Reject moves that lose material or allow mate.
 5. Choose the best candidate. If you are clearly winning, trade down and push toward checkmate; avoid repeating positions.
 
+Be concise: keep your whole reply short (at most ~120 words of analysis) - no long essays, no restating the
+position, no listing every legal move.
+
 Use only the position given (board, FEN, piece list) as ground truth - verify that the piece you move is really on
 that square and that the move is in the legal move list when one is given. Do not invent pieces or squares.
 
