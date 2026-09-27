@@ -49,7 +49,8 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   commentator) answer within a few seconds in a separate background call — the game never waits. A burst of
   messages gets one reply; messages arriving while it types are answered once more afterwards. Replies stay on
   the game (off-topic questions get a friendly redirect) and teach one Stockfish fact: opening, plan, threat,
-  why a move was good or a mistake.
+  why a move was good or a mistake. Asked for help ("what should I do?"), they give a hint from the player's own
+  Stockfish facts and explain why it works, so the player learns the idea; unasked, they don't give moves away.
 - Pure LLM toggle: no Stockfish hints/overview (legal-move list on); rated separately as "…, pure".
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's

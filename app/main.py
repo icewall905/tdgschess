@@ -889,6 +889,9 @@ A player just wrote in the game chat. Reply in 1-3 short sentences, kind and fun
 Always keep the conversation on THIS chess game: if they ask about something else, answer in a few friendly words \
 and bring it right back to the board. Be eager to teach: explain one real idea from the "Chess facts" (they come \
 from the Stockfish engine and are true) - the opening's name, a plan, a threat, why a move was good or a mistake. \
+If a player asks for help or a hint, help them gladly: suggest one of THEIR best moves from the "Facts for the \
+player" and explain simply WHY it is good (what it attacks, defends or prepares), so they learn the idea - not just \
+the move. Don't give away their best moves when they haven't asked.
 Never invent moves or pieces that are not in the facts. Kid-friendly: never mean, scary or rude. {lang}"""
 
 
@@ -916,7 +919,15 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     persona = spec.persona.strip() or "a cheerful chess buddy"
-    user = ("Chess facts (from Stockfish):\n" + "\n".join(f"- {f}" for f in facts)
+    helping = ""
+    opp = game.spec_for(not color)
+    if opp.type == "human":  # the player's own side, in case they ask for a hint
+        try:
+            a = await coach.analyse(board, not color)
+            helping = f"\n\nFacts for the player {opp.label()} (only use if they ask for help):\n" + coach.facts_text(a, opp.label())
+        except Exception:
+            pass
+    user = ("Chess facts (from Stockfish, from your side):\n" + "\n".join(f"- {f}" for f in facts) + helping
             + f"\n\nRecent chat:\n{history}\n\nNew messages to answer:\n" + "\n".join(f"- {m}" for m in unread)
             + "\n\nReply with only your chat message.")
     body = {"model": model, "temperature": 0.7, "max_tokens": 300,
