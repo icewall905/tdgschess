@@ -56,8 +56,8 @@ let skipAnim = false;     // human dropped the piece by drag, it is already on t
 const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
   llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
-  stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5 },
-  lc0: { type: "lc0", nodes: 0, movetime: 3 },
+  stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
+  lc0: { type: "lc0", nodes: 0, movetime: 3, commentary: false, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
 
@@ -66,6 +66,32 @@ function firstModel(idx = 0) {
   const pool = online.length ? online : config.endpoints;
   const ep = pool[Math.min(idx, pool.length - 1)];
   return ep ? { endpoint: ep.name, model: ep.models?.[0] || "" } : {};
+}
+
+// engines can get a chat line per move written by an LLM
+function commentaryFields(s, side, box) {
+  const rerender = () => { store.set("setup", setup); renderSide(side); };
+  box.append(h("label", { class: "chk" }, h("input", {
+    type: "checkbox", checked: !!s.commentary,
+    onchange: (e) => {
+      s.commentary = e.target.checked;
+      if (s.commentary && !s.comment_model) {
+        const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
+        if (ep) { s.comment_endpoint = ep.name; s.comment_model = ep.models?.[0] || ""; }
+      }
+      rerender();
+    },
+  }), "Chat comments by an LLM 💬"));
+  if (!s.commentary) return;
+  const ep = config.endpoints.find((x) => x.name === s.comment_endpoint);
+  box.append(
+    h("div", { class: "grid2" },
+      h("label", {}, "Endpoint", h("select", {
+        onchange: (e) => { s.comment_endpoint = e.target.value; const x = config.endpoints.find((y) => y.name === s.comment_endpoint); if (x?.models?.length) s.comment_model = x.models[0]; rerender(); },
+      }, ...config.endpoints.map((x) => h("option", { value: x.name, selected: x.name === s.comment_endpoint }, `${x.name}${x.online ? "" : " (offline)"}`)))),
+      h("label", {}, "Model", h("input", { value: s.comment_model || "", list: `cmodels-${side}`, oninput: (e) => { s.comment_model = e.target.value; store.set("setup", setup); } }),
+        h("datalist", { id: `cmodels-${side}` }, ...(ep?.models || []).map((m) => h("option", { value: m }))))),
+    h("label", {}, "Chat character (optional)", h("input", { value: s.persona || "", placeholder: "e.g. a friendly robot fish", oninput: (e) => { s.persona = e.target.value; store.set("setup", setup); } })));
 }
 
 function renderSide(side) {
@@ -156,10 +182,12 @@ function renderSide(side) {
       })),
       h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.1", min: "0.05", value: s.movetime, oninput: upd("movetime", num) })),
     );
+    commentaryFields(s, side, box);
   } else if (s.type === "lc0") {
     s.nodes = 0;
     box.append(h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.5", min: "0.5", value: s.movetime, oninput: upd("movetime", num) })),
       h("div", { class: "hint" }, "Lc0 always plays at full strength; more time = stronger."));
+    commentaryFields(s, side, box);
   }
 }
 
@@ -565,7 +593,7 @@ function renderLog(force) {
   const sig = `${game.id}:${game.log.length}:${showR}`;
   if (sig === logSig && !force) return;
   logSig = sig;
-  el.replaceChildren(...game.log.filter((e) => e.kind !== "chat").map((e) => {
+  el.replaceChildren(...game.log.filter((e) => e.kind !== "chat" && e.kind !== "comment").map((e) => {
     const moveNo = `${Math.floor(e.ply / 2) + 1}${e.side === "white" ? "." : "…"}`;
     return h("div", { class: `entry ${e.side}${e.error ? " error" : ""}` },
       h("div", { class: "h" },
@@ -636,7 +664,7 @@ function renderChat(force) {
           h("div", { class: "who" }, p.name || p.model || p.label, h("span", { class: "chip" }, `${moveNo} ${san}`)),
           h("div", { class: "txt" }, says[ply]))));
     } else {
-      spoken.add(key);
+      if (firstLoad) spoken.add(key);  // a late engine comment for a move seen live is still read aloud
       items.push(h("div", { class: `note mv${ply + 1 === cur ? " cur" : ""}`, onclick },
         `${p.type === "human" ? p.name || "You" : p.label} played ${moveNo} ${san}`));
     }

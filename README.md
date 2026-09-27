@@ -25,6 +25,9 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   `{"chat_template_kwargs": {"enable_thinking": false}}` to turn off reasoning on llama.cpp/Qwen.
 - Lc0: talks UCI over TCP to `../lc0/chess-engine` (socat, e.g. `LC0_UCI_TCP=lc0-host:4001`).
   That container must be running to use it.
+- Engine chat: Stockfish/Lc0 can have "Chat comments by an LLM" — after each engine move an LLM (endpoint +
+  model + optional character) writes a kid-friendly chat line from move facts, material and the eval bar's
+  score. It runs in the background, so the engine never waits for it; the comment appears when it arrives.
 - Players (👪): profiles with an emoji and a rating (start 1000, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game), Lc0 = 3000.
@@ -57,6 +60,10 @@ Lc0 runs the BT4-1024x15 net (`--backend-opts=max_batch=128 --minibatch-size=128
 the 3090) and only takes a time per move — it always plays full strength. Benchmarks next to TabbyAPI:
 t1-256x10 with minibatch 16: 15k nps; auto minibatch: 33k nps; t1-512x15: 13.6k nps, 1.5 GB; BT4 without
 `max_batch`: out of memory.
+
+TabbyAPI has priority on the GPU: lc0 starts via `/lc0-guarded.sh`, which refuses (and the game shows an
+error) unless at least `LC0_MIN_FREE_MIB` (1600) MiB of VRAM is free. Threads/minibatch tuned by benchmark:
+more threads or minibatch 256 were not faster.
 
 Only one lc0 process ever runs: the engine side's socat doesn't fork, and the app shares one lc0
 connection between all games (moves queue on a lock; parallel Lc0 games and Lc0 vs Lc0 are fine).

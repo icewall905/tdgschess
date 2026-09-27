@@ -100,6 +100,9 @@ class PlayerSpec(BaseModel):
     # engines
     elo: int = 0  # stockfish: 0 = full strength, else 1320..3190
     auto: bool = False  # stockfish: play a bit below the opponent's rating, easing off when far ahead
+    commentary: bool = False  # engines: an LLM writes a chat message for each move (uses persona/extra)
+    comment_endpoint: Optional[str] = None
+    comment_model: Optional[str] = None
     movetime: float = 0.5  # seconds per move
     nodes: int = 0  # lc0: legacy (old games); Lc0 now always searches for `movetime`
     _seat: Optional[str] = PrivateAttr(default=None)  # client id of the device playing this human side
@@ -198,7 +201,8 @@ class Lc0Pool:
                 err = e
                 await asyncio.sleep(0.5)
         raise RuntimeError(f"Lc0 unreachable at {LC0_UCI_TCP} ({type(err).__name__}: {err}) — "
-                           "is ../lc0/chess-engine running?")
+                           "is ../lc0/chess-engine running, and is there enough free VRAM? (lc0 won't start "
+                           "with less than ~1.6 GB free — the LLM has priority)")
 
     async def _drop(self):
         if self.engine:
@@ -618,6 +622,88 @@ def soften(elo: float, advantage_cp: int) -> float:
     return elo - min(1.0, (advantage_cp - 150) / 600) * 350
 
 
+COMMENT_PROMPT = """You are {persona}. You are the chess engine {engine}, playing {color} against {opp} in a game \
+watched by children. You just made a move. Write ONE short chat message (1-2 sentences, at most 25 words) that \
+reacts to what just happened in a cute, funny, kind way (proud of a capture, "oops" after losing a piece, excited \
+about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and kid-friendly: \
+never mean, scary or rude. Reply with only the message."""
+
+COMMENT_TASKS: set = set()  # keep references so fire-and-forget tasks aren't garbage collected
+
+
+def move_words(board: chess.Board, mv: chess.Move) -> str:
+    p = board.piece_at(mv.from_square)
+    txt = f"{board.san(mv)} ({PIECE_NAMES[p.piece_type]} {chess.square_name(mv.from_square)} to {chess.square_name(mv.to_square)}"
+    victim = board.piece_at(mv.to_square) or (chess.Piece(chess.PAWN, not p.color) if board.is_en_passant(mv) else None)
+    if victim:
+        txt += f", capturing a {PIECE_NAMES[victim.piece_type]}"
+    after = board.copy(stack=False)
+    after.push(mv)
+    txt += ", checkmate!" if after.is_checkmate() else ", check" if after.is_check() else ""
+    return txt + ")"
+
+
+def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Board, mv: chess.Move):
+    """Ask an LLM for a chat line about the engine's move, without delaying the game."""
+    if not (spec.commentary and spec.comment_model):
+        return
+    base = ENDPOINTS.get(spec.comment_endpoint or "", spec.comment_endpoint or "")
+    if not base:
+        return
+    side = "white" if color else "black"
+    ply = len(board.move_stack)
+    facts = []
+    if board.move_stack:
+        prev = board.copy()
+        last = prev.pop()
+        facts.append(f"Opponent's last move: {move_words(prev, last)}")
+    facts.append(f"Your move: {move_words(board, mv)}")
+    mat = {c: sum(PIECE_VALUES[p.piece_type] for p in board.piece_map().values() if p.color == c) for c in (True, False)}
+    after = board.copy(stack=False)
+    after.push(mv)
+    mat_after = {c: sum(PIECE_VALUES[p.piece_type] for p in after.piece_map().values() if p.color == c) for c in (True, False)}
+    diff = mat_after[color] - mat_after[not color]
+    facts.append("Material is even." if diff == 0 else f"You are {abs(diff)} points of material {'ahead' if diff > 0 else 'behind'}.")
+    ev = game.evals[-1] if game.evals else None
+    if ev:
+        cp = ev["cp"] if ev["cp"] is not None else (10000 if (ev["mate"] or 0) > 0 else -10000)
+        cp = cp if color else -cp
+        mood = ("you are winning big" if cp > 500 else "you are a bit better" if cp > 100 else
+                "the game is about even" if cp > -100 else "you are a bit worse" if cp > -500 else "you are losing")
+        facts.append(f"Your feeling about the position: {mood}.")
+    if after.is_checkmate():
+        facts.append("This move wins the game!")
+    opp = game.spec_for(not color).label()
+    persona = spec.persona.strip() or "a cheerful chess buddy"
+    body = {
+        "model": spec.comment_model,
+        "messages": [
+            {"role": "system", "content": COMMENT_PROMPT.format(persona=persona, engine=spec.label(),
+                                                                color="White" if color else "Black", opp=opp)},
+            {"role": "user", "content": "\n".join(facts)},
+        ],
+        "temperature": 0.8, "max_tokens": 600, **spec.extra,
+    }
+
+    async def run():
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
+                r = await client.post(base.rstrip("/") + "/chat/completions", json=body,
+                                      headers={"Authorization": f"Bearer {API_KEY}"})
+                r.raise_for_status()
+                text = r.json()["choices"][0]["message"].get("content") or ""
+        except Exception:
+            return
+        text = THINK_RE.sub("", text).strip()
+        text = re.sub(r"^\s*SAY\s*[:：]\s*", "", text, flags=re.I).strip().strip("\"'`*").strip()
+        if text:
+            game.add_log({"ply": ply, "side": side, "move": board.san(mv), "say": text[:300], "kind": "comment"})
+
+    task = asyncio.create_task(run())
+    COMMENT_TASKS.add(task)
+    task.add_done_callback(COMMENT_TASKS.discard)
+
+
 class StockfishPlayer:
     def __init__(self, spec: PlayerSpec, color: bool, game: "Game"):
         self.spec, self.color, self.game = spec, color, game
@@ -645,6 +731,7 @@ class StockfishPlayer:
         else:
             mv = (await self.engine.play(board, chess.engine.Limit(time=self.spec.movetime))).move
         self.game.stats[self.side]["seconds"] += time.time() - t0
+        engine_comment(self.game, self.spec, self.color, board, mv)
         return mv
 
     async def auto_move(self, board: chess.Board) -> chess.Move:
@@ -689,6 +776,7 @@ class Lc0Player:
         t0 = time.time()
         mv = await LC0.play(board, limit, self.game.id)
         self.game.stats["white" if self.color else "black"]["seconds"] += time.time() - t0
+        engine_comment(self.game, self.spec, self.color, board, mv)
         return mv
 
 
