@@ -323,6 +323,12 @@ def explain_latest(game, coro):
         old.cancel()
 
     async def run():
+        try:
+            # wait for a pause first: during fast play the explanation is replaced before any LLM call is made
+            await asyncio.sleep(main().QUIET_BEFORE_LLM)
+        except asyncio.CancelledError:
+            coro.close()
+            raise
         game.teach_busy = True
         game.touch()
         try:

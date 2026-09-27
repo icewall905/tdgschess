@@ -86,6 +86,12 @@ Live games with a human that nobody has looked at for `HIBERNATE_AFTER` seconds 
 "hibernated" and stopped; so are all running games when the server shuts down. They show a ▶ Resume button
 (Games list and game page) that rebuilds the game at the same position, with the original devices' seats.
 
+Throttling: optional LLM talk (engine commentary, the teacher's per-turn explanations) waits for
+`QUIET_BEFORE_LLM` seconds (2.5) without a new move; if the players move on, it is replaced before any LLM call
+is made, so 12 book moves in 12 s cost nothing and one comment arrives once the game pauses. In a known opening
+line the commentator only talks on a capture, check or a new opening name. LLM players still write their chat
+line in the same call that picks their move; chat replies batch bursts of messages.
+
 Chat lines are "chess-smart": LLM players and the engines' LLM commentator get Chat facts from Stockfish — the
 opening name (Lichess CC0 opening list, `app/data/openings.tsv`), the engine's verdict on the opponent's last
 move and how to punish it, the evaluation, Stockfish's plan and threats — and are told to use one real idea

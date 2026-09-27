@@ -247,7 +247,8 @@ class SayReq(BaseModel):
 # ---------------------------------------------------------------- analysis
 
 ENGINE_IDLE = float(os.environ.get("ENGINE_IDLE", "300"))
-HIBERNATE_AFTER = float(os.environ.get("HIBERNATE_AFTER", "3600"))  # s without any player viewing a live game  # seconds without use before a Stockfish is shut down
+HIBERNATE_AFTER = float(os.environ.get("HIBERNATE_AFTER", "3600"))
+QUIET_BEFORE_LLM = float(os.environ.get("QUIET_BEFORE_LLM", "2.5"))  # s without a new move before optional LLM talk  # s without any player viewing a live game  # seconds without use before a Stockfish is shut down
 
 
 class LazyEngine:
@@ -1026,10 +1027,6 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
         facts.append(f"Your feeling about the position: {mood}.")
     if after.is_checkmate():
         facts.append("This move wins the game!")
-    unread = unread_chat(game, side)
-    if unread:
-        facts.append("The players wrote in the chat since your last move - answer them kindly and briefly in "
-                     "your message:\n" + "\n".join(f"- {m}" for m in unread))
     opp = game.spec_for(not color).label()
     persona = spec.persona.strip() or "a cheerful chess buddy"
     body = {
@@ -1043,6 +1040,16 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
     }
 
     async def run():
+        # throttle: only talk once the game pauses (fast book moves get no comment at all), and in a known
+        # opening line only when something happens (capture, check, a new opening name)
+        await asyncio.sleep(QUIET_BEFORE_LLM)
+        if len(game.board.move_stack) > ply + 1 or game.status != "running":
+            return  # the players already moved on; a later comment covers the newer position
+        opening = opening_of(after)
+        notable = board.is_capture(mv) or after.is_check() or after.is_checkmate()
+        if opening and not notable and game.comment_opening.get(side) == opening:
+            return
+        game.comment_opening[side] = opening
         # expert context from Stockfish (opening, verdict on the opponent's move, threats, what comes next)
         extra = [f for f in await chat_context(board, color) if not f.startswith(("Stockfish's plan", "The position for you"))]
         try:
@@ -1066,7 +1073,11 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
         if text:
             game.add_log({"ply": ply, "side": side, "move": board.san(mv), "say": text[:300], "kind": "comment"})
 
+    old = game.comment_tasks.get(side)
+    if old and not old.done():
+        old.cancel()  # a newer move replaces a comment that is still waiting for a pause
     task = asyncio.create_task(run())
+    game.comment_tasks[side] = task
     COMMENT_TASKS.add(task)
     task.add_done_callback(COMMENT_TASKS.discard)
 
@@ -1189,7 +1200,9 @@ class Game:
         self.teach_busy = False
         self.teach_kid: Optional[tuple] = None  # learner's last move, explained together with the reply
         self.chat_seen: dict[str, int] = {}
-        self.reply_tasks: dict[str, asyncio.Task] = {}  # side -> log length when its LLM last read the players' chat
+        self.reply_tasks: dict[str, asyncio.Task] = {}
+        self.comment_tasks: dict[str, asyncio.Task] = {}
+        self.comment_opening: dict[str, Optional[str]] = {}  # side -> log length when its LLM last read the players' chat
         self.review_decisions: asyncio.Queue = asyncio.Queue()
 
     def touch(self):
