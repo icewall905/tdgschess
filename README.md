@@ -1,6 +1,6 @@
 # Chess Arena
 
-Web UI at http://10.0.10.23:8765 — human / LLM / Stockfish / Lc0 in any combination.
+Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / LLM / Stockfish / Lc0 in any combination.
 
 - Backend: FastAPI + python-chess (`app/main.py`), Stockfish 17 bundled in the image.
 - LLMs: any OpenAI-compatible `/v1` endpoint, set in `.env` as `ENDPOINTS=name=url,name=url`.
@@ -23,7 +23,7 @@ Web UI at http://10.0.10.23:8765 — human / LLM / Stockfish / Lc0 in any combin
   The first prompt of each move is logged (Model log → show reasoning → "prompt").
 - Extra request JSON per LLM player is merged into the chat request, e.g.
   `{"chat_template_kwargs": {"enable_thinking": false}}` to turn off reasoning on llama.cpp/Qwen.
-- Lc0: talks UCI over TCP to `../lc0/chess-engine` (socat on `10.0.10.23:4001`) via `LC0_UCI_TCP`.
+- Lc0: talks UCI over TCP to `../lc0/chess-engine` (socat, e.g. `LC0_UCI_TCP=lc0-host:4001`).
   That container must be running to use it.
 - Matches: "Games" > 1 plays a series, alternating colours; results aggregate in Standings.
 - Finished games are saved as JSON (incl. PGN + full model log) in `./data/games/`.
