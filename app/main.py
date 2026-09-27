@@ -521,7 +521,9 @@ SAY: <your message>
 The message is 1-2 short sentences (at most 25 words) that react to the opponent's last move and/or announce your
 own move in a cute, funny, kind way that fits the position (proud of a capture, "oops!" after losing a piece,
 excited about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and
-kid-friendly: never mean, scary or rude. Speak in character{persona}."""
+kid-friendly: never mean, scary or rude. Speak in character{persona}.
+Vary your messages: start each one differently (not "Wow", "Hello" or the same exclamation every time) and
+don't repeat what you said in your recent messages."""
 
 
 def parse_say(text: str) -> str:
@@ -595,6 +597,12 @@ class LLMPlayer:
                          + "\nThese are strong. Normally play one of them; only deviate for a clear reason.")
         if self.spec.show_legal:
             parts.append("Legal moves, by piece:\n" + legal_by_piece(board))
+        if self.spec.chat:
+            mine = [e["say"] for e in self.game.log if e.get("side") == ("white" if self.color else "black")
+                    and e.get("say") and e.get("kind") != "chat"][-3:]
+            if mine:
+                parts.append("Your recent chat messages (say something new, and start it differently):\n"
+                             + "\n".join(f"- {m}" for m in mine))
         if rejected:
             parts.append("Your previous attempt(s) were rejected:\n" + "\n".join(f"- {r}" for r in rejected)
                          + "\nChoose a different, legal move" + (" from the list above." if self.spec.show_legal else "."))
