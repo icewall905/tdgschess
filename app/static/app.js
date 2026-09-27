@@ -613,6 +613,7 @@ function renderLog(force) {
 
 // ------------------------------------------------------------ chat
 let chatSig = "";
+let chatStick = true;  // follow new messages unless the user scrolled up to read
 const spoken = new Set();
 const moverSide = (ply) => {
   const blackFirst = game.fens[0].split(" ")[1] === "b";
@@ -688,9 +689,9 @@ function renderChat(force) {
   }
   else if (game.status !== "running" && game.status !== "queued") items.push(h("div", { class: "note end" }, game.termination || game.status));
   renderReact();
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
   el.replaceChildren(...items);
-  if (atBottom || firstLoad) el.scrollTop = el.scrollHeight;
+  if (firstLoad) chatStick = true;
+  if (chatStick) el.scrollTop = el.scrollHeight;
 }
 
 const REACTIONS = ["👏", "😮", "😂", "🤔", "👍", "❤️", "😱", "🎉"];
@@ -1020,6 +1021,10 @@ $("#flip").onclick = () => { orientation = orientation === "white" ? "black" : "
 $("#sound").onchange = () => { store.set("sound", $("#sound").checked); if ($("#sound").checked) sound("move"); };
 $("#show-best").onchange = () => { store.set("showBest", $("#show-best").checked); renderBoard(); };
 $$(".tabs button").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+$("#chat").addEventListener("scroll", () => {
+  const el = $("#chat");
+  chatStick = el.scrollHeight - el.scrollTop - el.clientHeight < 60;
+});
 $("#speak").onchange = () => { store.set("speak", $("#speak").checked); if (!$("#speak").checked) window.speechSynthesis?.cancel(); };
 $("#show-reasoning").onchange = () => { store.set("showReasoning", $("#show-reasoning").checked); renderLog(true); };
 $("#resign").onclick = async () => { if (game && confirm("Resign this game?")) { await api(`/api/games/${game.id}/resign`, { method: "POST" }).catch((e) => alert(e.message)); poll(true); } };
