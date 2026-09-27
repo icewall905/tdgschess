@@ -89,6 +89,7 @@ def full_llm_key(model_key: str, endpoint: Optional[str]) -> str:
 
 def new_llm_rating(key: str) -> dict:
     model, _, ep = key.partition(" · ")
+    ep = ep.replace(" · SF hints", " + SF hints")
     return {"key": key, "name": f"{model.rsplit('/', 1)[-1]}{f' ({ep})' if ep else ''}", "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
             "l": 0, "history": [{"t": time.time(), "rating": LLM_START_RATING}], "created": time.time()}
 
@@ -175,6 +176,7 @@ class PlayerSpec(BaseModel):
     max_tokens: int = 8192
     show_legal: bool = True
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
+    engine_hints: bool = False  # Stockfish's top 3 moves (0.5 s) + a game overview; rated separately as assisted
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
     persona: str = ""  # optional character for the chat messages, e.g. "a friendly pirate"
@@ -260,6 +262,66 @@ class Analyzer:
 
 
 ANALYZER = Analyzer()
+
+
+class Advisor:
+    """Stockfish's top moves for LLM players with engine hints (separate from the eval-bar engine)."""
+
+    def __init__(self):
+        self.engine = None
+        self.lock = asyncio.Lock()
+
+    async def top_moves(self, board: chess.Board, n: int = 3, seconds: float = 0.5) -> list[dict]:
+        async with self.lock:
+            try:
+                if self.engine is None:
+                    _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
+                    await self.engine.configure({"Threads": 2, "Hash": 128})
+                infos = await self.engine.analyse(board, chess.engine.Limit(time=seconds),
+                                                  multipv=min(n, board.legal_moves.count()))
+            except Exception:
+                self.engine = None
+                return []
+        out = []
+        for info in infos:
+            pv = info.get("pv") or []
+            if not pv:
+                continue
+            b = board.copy()
+            line = []
+            for mv in pv[:4]:
+                line.append(b.san(mv))
+                b.push(mv)
+            score = info["score"].pov(board.turn)
+            out.append({"move": line[0], "line": line, "cp": score.score(mate_score=100000), "mate": score.mate()})
+        return out
+
+
+ADVISOR = Advisor()
+
+
+def eval_words(cp: int, mate: Optional[int]) -> str:
+    if mate is not None:
+        return f"you can force checkmate in {mate}" if mate > 0 else f"you get checkmated in {-mate} with best play"
+    pawns = cp / 100
+    mood = ("you are winning" if cp > 300 else "you are better" if cp > 80 else "roughly equal" if cp > -80
+            else "you are worse" if cp > -300 else "you are losing")
+    return f"{pawns:+.1f} ({mood})"
+
+
+def game_overview(board: chess.Board, color: bool) -> str:
+    n = sum(PIECE_VALUES[p.piece_type] for p in board.piece_map().values() if p.piece_type != chess.PAWN)
+    phase = "opening" if board.fullmove_number <= 10 and n > 50 else "endgame" if n <= 26 else "middlegame"
+    lines = [f"Move {board.fullmove_number}, {phase}."]
+    b = board.copy()
+    recent = []
+    for _ in range(min(6, len(b.move_stack))):
+        mv = b.pop()
+        who = "You" if b.turn == color else "Opponent"
+        recent.append(f"{who}: {move_words(b, mv)}")
+    if recent:
+        lines.append("Recent moves (oldest first):\n" + "\n".join(f"- {r}" for r in reversed(recent)))
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------- players
@@ -506,7 +568,7 @@ class LLMPlayer:
             sp += CHAT_PROMPT.format(persona=f" as {persona}" if persona else " as a cheerful chess buddy")
         return sp
 
-    def build_prompt(self, board: chess.Board, rejected: list[str]) -> list[dict]:
+    def build_prompt(self, board: chess.Board, rejected: list[str], advice: Optional[list[dict]] = None) -> list[dict]:
         cname = "White" if self.color else "Black"
         parts = []
         mt = movetext(board)
@@ -522,8 +584,15 @@ class LLMPlayer:
                      f"{board_diagram(board)}")
         if board.is_check():
             parts.append("You are in CHECK - you must get out of check.")
+        if self.spec.engine_hints:
+            parts.append("Game overview:\n" + game_overview(board, self.color))
         if self.spec.hints:
             parts.append("Position facts (plain facts computed from the board, no evaluation - you must still choose the move yourself):\n" + position_facts(board, self.color))
+        if advice:
+            rows = [f"{i + 1}. {a['move']}  eval {eval_words(a['cp'], a['mate'])}  line: {' '.join(a['line'])}"
+                    for i, a in enumerate(advice)]
+            parts.append("Engine suggestions (Stockfish, 0.5 s, best first; eval from your side):\n" + "\n".join(rows)
+                         + "\nThese are strong. Normally play one of them; only deviate for a clear reason.")
         if self.spec.show_legal:
             parts.append("Legal moves, by piece:\n" + legal_by_piece(board))
         if rejected:
@@ -547,9 +616,10 @@ class LLMPlayer:
         side = "white" if self.color else "black"
         stats = self.game.stats[side]
         attempt, net_fails = 0, 0
+        advice = await ADVISOR.top_moves(board) if self.spec.engine_hints else None
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             while attempt <= self.spec.retries:
-                messages = self.build_prompt(board, rejected)
+                messages = self.build_prompt(board, rejected, advice)
                 body = {
                     "model": self.spec.model,
                     "messages": messages,
@@ -1126,7 +1196,7 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
         apply_profile(spec)
         if spec.type == "llm" and spec.endpoint and spec.model:
-            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model)
+            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model) + (" · SF hints" if spec.engine_hints else "")
         if spec.type == "human" and not spec.remote:
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):

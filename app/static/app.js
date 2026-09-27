@@ -55,7 +55,7 @@ let skipAnim = false;     // human dropped the piece by drag, it is already on t
 // ------------------------------------------------------------ setup form
 const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
-  llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
+  llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: true, hints: true, engine_hints: false, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
   stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
@@ -133,6 +133,7 @@ function renderSide(side) {
     const dl = h("datalist", { id: `models-${side}` }, ...(ep?.models || []).map((m) => h("option", { value: m, label: mi(m) ? `⭐ ${mi(m).rating}${mi(m).key !== m ? ` · ${mi(m).key}` : ""}` : "" })));
     const ratingNote = h("div", { class: "hint rating-note" });
     const showRating = () => {
+      if (s.engine_hints) { ratingNote.textContent = "Rated separately with SF hints"; return; }
       const info = mi(s.model);
       ratingNote.textContent = !s.model ? "" : info
         ? (info.games ? `⭐ ${info.rating} · ${info.games} rated game${info.games === 1 ? "" : "s"}` : `⭐ ${info.rating} · new model, not rated yet`) + (info.key !== s.model ? ` · plays as ${info.key}` : "")
@@ -148,6 +149,12 @@ function renderSide(side) {
         h("label", {}, "Max tokens", h("input", { type: "number", step: "256", value: s.max_tokens, oninput: upd("max_tokens", num) }))),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.show_legal, onchange: upd("show_legal") }), "Give legal move list in prompt"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.hints ?? true, onchange: upd("hints") }), "Give position facts (material, hanging pieces, checks, captures)"),
+      h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.engine_hints, onchange: (e) => {
+        s.engine_hints = e.target.checked;
+        if (s.engine_hints) s.show_legal = false;  // the top 3 are a clearer shortlist than every legal move
+        store.set("setup", setup); renderSide(side);
+      } }), "Stockfish hints: top 3 moves (0.5 s) + game overview"),
+      s.engine_hints ? h("div", { class: "hint" }, "Engine-assisted: rated separately (\"+ SF hints\"), so the plain rating stays honest.") : null,
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.vision, onchange: upd("vision") }), "Send board image (vision models only)"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.chat ?? true, onchange: upd("chat") }), "Chat message with each move 💬"),
       h("label", {}, "Chat character (optional)", h("input", { value: s.persona || "", placeholder: "e.g. a friendly pirate, a sleepy cat", oninput: upd("persona") })),
