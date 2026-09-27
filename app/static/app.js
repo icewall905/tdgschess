@@ -840,7 +840,8 @@ function renderTeach(force) {
   if (!game?.learning) { el.replaceChildren(); ctl.hidden = true; teachSig = ""; return; }
   $$("#teach-lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === game.lang));
   const entries = game.log.map((e, i) => ({ ...e, i })).filter((e) => e.kind === "teach" || e.kind === "ask");
-  const sig = `${game.id}:${entries.length}:${selectedTeach}:${teachPending}:${game.lang}`;
+  const busy = teachPending || game.teach_busy;
+  const sig = `${game.id}:${entries.length}:${selectedTeach}:${busy}:${game.lang}`;
   if (sig === teachSig && !force) return;
   const firstLoad = !teachSig.startsWith(game.id + ":");
   teachSig = sig;
@@ -857,7 +858,7 @@ function renderTeach(force) {
           e.cls && e.cls !== "good" ? h("span", { class: `chip q-${e.cls}` }, e.cls) : null, e.arrows?.length ? "🏹" : null),
         h("div", { class: "txt" }, e.say)));
   }) : [h("div", { class: "empty" }, h("b", {}, "🎓"), tr("empty"))];
-  if (teachPending) items.push(h("div", { class: "msg white teacher typing" }, h("span", { class: "av emoji" }, "🎓"),
+  if (busy) items.push(h("div", { class: "msg white teacher typing" }, h("span", { class: "av emoji" }, "🎓"),
     h("div", { class: "bubble" }, h("div", { class: "who" }, tr("thinking")), h("div", { class: "dots" }, h("i"), h("i"), h("i")))));
   el.replaceChildren(...items);
   if (firstLoad) teachStick = true;

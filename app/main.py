@@ -997,6 +997,9 @@ class Game:
         self.ratings: dict[str, dict] = {}  # side -> {"profile", "before", "after", "delta"}
         self.engine_elo: dict[str, list[float]] = {"white": [], "black": []}
         self.review: Optional[dict] = None  # learning mode: a blunder waiting for "undo" / "keep"
+        self.teach_task: Optional[asyncio.Task] = None  # learning: the running per-turn explanation
+        self.teach_busy = False
+        self.teach_kid: Optional[tuple] = None  # learner's last move, explained together with the reply
         self.chat_seen: dict[str, int] = {}  # side -> log length when its LLM last read the players' chat
         self.review_decisions: asyncio.Queue = asyncio.Queue()
 
@@ -1151,8 +1154,8 @@ class Game:
                 b.push(mv)
                 self.thinking_since = None
                 self.touch()
-                if self.opts.learning and not (isinstance(rev, dict) and rev.get("explained")):
-                    coach.background(coach.explain_move(self, before, mv, rev if isinstance(rev, dict) else None))
+                if self.opts.learning:
+                    self.queue_explanation(before, mv, rev if isinstance(rev, dict) else None)
                 if self.opts.analysis:
                     self.evals.append(await ANALYZER.evaluate(b))
                     self.touch()
@@ -1170,6 +1173,23 @@ class Game:
         finally:
             for p in players.values():
                 await p.close()
+
+    def queue_explanation(self, before: chess.Board, mv: chess.Move, rev: Optional[dict]):
+        """Learning mode: explain once per turn (the learner's move + the reply), dropping stale explanations."""
+        learner_color, _ = coach.learner(self)
+        if before.turn == learner_color:
+            already = bool(rev and rev.get("explained"))  # a paused blunder was explained on the card already
+            self.teach_kid = None if already else (before, mv, rev)
+            if self.board.is_game_over() or self.spec_for(not learner_color).type == "human":
+                self.flush_explanation()  # no reply coming (game over / two humans): explain right away
+            return
+        kid, self.teach_kid = self.teach_kid, None
+        coach.explain_latest(self, coach.explain_turn(self, kid, (before, mv)))
+
+    def flush_explanation(self):
+        if self.teach_kid:
+            kid, self.teach_kid = self.teach_kid, None
+            coach.explain_latest(self, coach.explain_turn(self, kid, None))
 
     async def check_learner_move(self, b: chess.Board, mv: chess.Move):
         """Learning mode: pause on a blunder so the learner can take it back. Returns the review, or "undo"."""
@@ -1230,6 +1250,7 @@ class Game:
             engine_now={side: round(e[-1]) for side, e in self.engine_elo.items() if e},
             lang=self.opts.lang,
             review=dict(self.review) if self.review else None,
+            teach_busy=self.teach_busy,
         )
         return s
 

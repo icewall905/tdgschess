@@ -22,8 +22,10 @@ ANALYSE_SECONDS = 0.3
 
 TEXT = {
     "en": {"undone": "↩️ Move taken back — try again!", "kept": "OK, we keep that move. Let's see what happens!",
+           "away": "The teacher is taking a short break — try again in a moment! ☕",
            "lang": "Always answer in English."},
     "da": {"undone": "↩️ Trækket er taget tilbage — prøv igen!", "kept": "OK, vi beholder trækket. Lad os se, hvad der sker!",
+           "away": "Læreren holder en lille pause — prøv igen om lidt! ☕",
            "lang": "Svar altid på dansk (Danish). Brug danske skaknavne: bonde, springer, løber, tårn, dronning, konge."},
 }
 
@@ -252,7 +254,8 @@ def learner(game) -> tuple[bool, str]:
     return color, f"{spec.name or 'the child'} ({'White' if color else 'Black'})"
 
 
-async def llm(game, user: str, max_tokens: int = 350) -> str:
+async def llm(game, user: str, max_tokens: int = 350) -> Optional[str]:
+    """The teacher's answer, or None if the endpoint is unavailable (callers decide what the child sees)."""
     base, model, lang = teacher_of(game)
     color, who = learner(game)
     spec = game.white if color else game.black
@@ -274,8 +277,13 @@ async def llm(game, user: str, max_tokens: int = 350) -> str:
                     break
                 body["max_tokens"] = max_tokens * 4  # still empty: the model must have thought anyway
     except Exception as e:
-        return f"(teacher unavailable: {type(e).__name__})"
-    return text or "(the teacher had nothing to say)"
+        print(f"teacher LLM unavailable: {type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        return None
+    return text or None
+
+
+def away(game) -> str:
+    return TEXT[teacher_of(game)[2]]["away"]
 
 
 def conversation(game, n: int = 6) -> str:
@@ -294,7 +302,7 @@ def add_teach(game, text: str, arrows=None, squares=None, **extra):
 TASKS: set = set()
 
 
-def background(coro):
+def background(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
     TASKS.add(task)
 
@@ -304,29 +312,55 @@ def background(coro):
             print(f"learning mode task failed: {t.exception()!r}", file=sys.stderr, flush=True)
 
     task.add_done_callback(done)
+    return task
 
 
-async def explain_move(game, board: chess.Board, move: chess.Move, rev: Optional[dict]):
-    """1-2 sentences after every move (the child's and the computer's)."""
+def explain_latest(game, coro):
+    """Per-move explanations never queue up: a newer one replaces one that hasn't finished, so a fast player
+    always gets the teacher's view of the current position and the LLM endpoint gets at most one call per game."""
+    old = getattr(game, "teach_task", None)
+    if old and not old.done():
+        old.cancel()
+
+    async def run():
+        game.teach_busy = True
+        game.touch()
+        try:
+            await coro
+        finally:
+            game.teach_busy = False
+            game.touch()
+
+    game.teach_task = background(run())
+
+
+async def explain_turn(game, kid: Optional[tuple], comp: Optional[tuple]):
+    """One explanation per turn: the child's move (board, move, review) and the computer's reply (board, move)."""
     color, who = learner(game)
-    mover_is_kid = board.turn == color
-    rev = rev or await review(board, move, board.turn)
-    after = board.copy()
-    after.push(move)
-    a = await analyse(after, color)
-    if mover_is_kid:
-        task = (f"The child just played {rev['words']}. In 1-2 short sentences, tell them what this move does and "
-                f"whether it was good (engine verdict: {rev['cls']}). If it was not the best, gently name one better move.")
-        facts = review_text(rev, who)
-    else:
-        task = ("The computer (opponent) just played " + rev["words"] + ". In 1-2 short sentences, explain what the "
-                "computer is trying to do, and what the child should watch out for now.")
-        facts = f"- The computer played {rev['words']}"
-    user = f"{facts}\n{facts_text(a, who)}\n\n{task}"
-    text = await llm(game, user, 250)
-    add_teach(game, text, [r for r in rev["arrows"] if r["color"] in ("blue", "green")][:2],
-              ply=len(board.move_stack) + 1, about=rev["san"], cls=rev["cls"] if mover_is_kid else None,
-              mover="kid" if mover_is_kid else "computer")
+    facts, parts, about, arrows = [], [], [], []
+    kid_rev = None
+    if kid:
+        kb, kmv, kid_rev = kid
+        kid_rev = kid_rev or await review(kb, kmv, color)
+        facts.append(review_text(kid_rev, who))
+        about.append(kid_rev["san"])
+        arrows += [a for a in kid_rev["arrows"] if a["color"] == "green"][:2]
+        parts.append(f"say briefly whether the child's move {kid_rev['words']} was good (engine verdict: "
+                     f"{kid_rev['cls']}; if not the best, gently name one better move)")
+    if comp:
+        cb, cmv = comp
+        words = move_words(cb, cmv)
+        facts.append(f"- The computer answered {words}")
+        about.append(cb.san(cmv))
+        parts.append(f"explain what the computer's answer {words} is trying to do")
+    a = await analyse(game.board, color)
+    parts.append("say what the child should look out for now")
+    user = f"{chr(10).join(facts)}\n{facts_text(a, who)}\n\nIn 2-3 short sentences: " + "; then ".join(parts) + "."
+    text = await llm(game, user, 300)
+    if not text:
+        return  # teacher unreachable: skip this turn quietly, the next one will try again
+    add_teach(game, text, arrows, ply=len(game.board.move_stack), about=" · ".join(about),
+              cls=kid_rev["cls"] if kid_rev else None, mover="turn")
 
 
 async def explain_blunder(game, board: chess.Board, rev: dict):
@@ -335,7 +369,7 @@ async def explain_blunder(game, board: chess.Board, rev: dict):
     user = (f"{review_text(rev, who)}\n{facts_text(a, who)}\n\nThe child's move is a big mistake and the game is "
             "paused so they can take it back. In at most 3 short sentences: say kindly what goes wrong (what the opponent "
             "can now do), then suggest the better move(s) and why they are better.")
-    text = await llm(game, user, 350)
+    text = await llm(game, user, 350) or away(game)  # the card still shows the arrows and better moves
     if game.review and game.review.get("ply") == len(board.move_stack):
         game.review["text"] = text
         game.touch()
@@ -347,7 +381,7 @@ async def hint(game) -> dict:
     user = (f"{facts_text(a, who)}\n\nThe child asks for a hint. First give a gentle nudge about what to look for "
             "(a threat, a piece in danger, a good plan). Then suggest 1-2 of the engine's best moves and explain "
             "simply why they are good. At most 3 short sentences.")
-    text = await llm(game, user, 350)
+    text = await llm(game, user, 350) or away(game)
     arrows = [{"from": chess.square_name(t["move"].from_square), "to": chess.square_name(t["move"].to_square),
                "color": "green"} for t in a["top"][:2]]
     squares = [d["square"] for d in a["danger"][:2]]
@@ -383,7 +417,7 @@ async def answer(game, question: str) -> dict:
     user = (f"{facts_text(a, who)}\n{('Moves the child asked about (engine-checked):' + chr(10) + extra) if extra else ''}\n"
             f"{conversation(game)}\n\nThe child asks: \"{question}\"\nAnswer kindly and simply in 2-5 short sentences, "
             "using only the engine facts.")
-    text = await llm(game, user, 450)
+    text = await llm(game, user, 450) or away(game)
     arrows = [x for r in checked for x in r["arrows"]][:4]
     add_teach(game, text, arrows, [s for r in checked for s in r["squares"]], reply_to=question)
     return {"ok": True}

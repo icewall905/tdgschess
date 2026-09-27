@@ -31,7 +31,10 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   model + optional character) writes a kid-friendly chat line from move facts, material and the eval bar's
   score. It runs in the background, so the engine never waits for it; the comment appears when it arrives.
 - 🎓 Learning mode (preset "Learn with a teacher", or the Learning mode box): the kid plays auto Stockfish and
-  an LLM teacher (endpoint/model picked in setup, thinking switched off) explains every move in 1-2 sentences.
+  an LLM teacher (endpoint/model picked in setup, thinking switched off) explains each turn (the kid's move +
+  the computer's reply) in 2-3 sentences. A newer turn replaces an explanation that hasn't finished, so fast
+  players don't queue up LLM calls; if the endpoint is down, explanations are skipped and hints/questions get
+  a friendly "teacher is on a break" message.
   All chess facts come from Stockfish (`app/coach.py`): evaluation, top moves + plans, threats (null-move search),
   pieces in danger, and a review of each of the kid's moves (win-probability loss: blunder/mistake/inaccuracy,
   what it allows, forks, missed mates, better moves). A blunder pauses the game before the engine replies and
