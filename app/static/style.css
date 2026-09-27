@@ -182,11 +182,13 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
 .player-bar .name { font-weight: 800; font-size: 14.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
 .player-bar .who { display: flex; flex-direction: column; min-width: 0; }
 .player-bar .who .row { display: flex; align-items: center; gap: 6px; min-height: 18px; }
-.player-bar .captured { display: inline-flex; align-items: center; min-height: 18px; }
-.player-bar .captured img { width: 17px; height: 17px; }
-.player-bar .captured img.same { margin-left: -9px; }
-.player-bar .captured img:not(.same):not(:first-child) { margin-left: 2px; }
-.player-bar .captured .diff { color: var(--muted); font-size: 12px; font-weight: 800; margin-left: 5px; }
+/* light chip behind captured pieces so black pieces stay visible in dark mode */
+.player-bar .captured { display: inline-flex; align-items: center; min-height: 26px; }
+.player-bar .captured:has(img) { background: #eceff4; border-radius: 999px; padding: 1px 8px 1px 5px; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .06); }
+.player-bar .captured img { width: 24px; height: 24px; filter: drop-shadow(0 1px 0 rgba(255, 255, 255, .7)); }
+.player-bar .captured img.same { margin-left: -12px; }
+.player-bar .captured img:not(.same):not(:first-child) { margin-left: 1px; }
+.player-bar .captured .diff { color: #5b6270; font-size: 12.5px; font-weight: 800; margin-left: 5px; }
 .player-bar .marks { display: inline-flex; gap: 5px; font-size: 12px; font-weight: 800; }
 .nag.blunder { color: var(--bad); } .nag.mistake { color: #f97316; } .nag.inaccuracy { color: var(--warn); }
 .moves .m .nag { font-weight: 800; margin-left: 1px; }
