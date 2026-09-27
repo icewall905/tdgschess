@@ -74,6 +74,84 @@ def save_profiles():
 PROFILES = load_profiles()
 save_profiles()
 
+# ---------------------------------------------------------------- LLM model ratings
+
+LLM_RATINGS_FILE = DATA_DIR / "llm_ratings.json"
+LLM_START_RATING = 600
+MODEL_KEYS: dict[tuple[str, str], str] = {}  # (endpoint name, model id) -> rating key (the real model behind aliases)
+
+
+def new_llm_rating(key: str) -> dict:
+    return {"key": key, "name": key.rsplit("/", 1)[-1], "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
+            "l": 0, "history": [{"t": time.time(), "rating": LLM_START_RATING}], "created": time.time()}
+
+
+def save_llm_ratings():
+    tmp = LLM_RATINGS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(LLM_RATINGS, ensure_ascii=False))
+    tmp.replace(LLM_RATINGS_FILE)
+
+
+try:
+    LLM_RATINGS: dict[str, dict] = json.loads(LLM_RATINGS_FILE.read_text())
+    LLM_BACKFILL = False
+except FileNotFoundError:
+    LLM_RATINGS, LLM_BACKFILL = {}, True  # built from the archived games on startup
+
+
+async def probe_endpoint(name: str, url: str) -> Optional[list[str]]:
+    """List an endpoint's models and remember which real model each id (e.g. the "currentmodel" alias) is."""
+    try:
+        async with httpx.AsyncClient(timeout=4) as c:
+            r = await c.get(url + "/models", headers={"Authorization": f"Bearer {API_KEY}"})
+            r.raise_for_status()
+            models = r.json().get("data", [])
+            model_path = None
+            if any(not m.get("root") for m in models):
+                try:  # llama.cpp / TabbyAPI style: the loaded model's path
+                    pr = await c.get(url.removesuffix("/v1") + "/props", headers={"Authorization": f"Bearer {API_KEY}"})
+                    model_path = pr.json().get("model_path") if pr.status_code == 200 else None
+                except Exception:
+                    pass
+    except Exception:
+        return None
+    loaded = model_path.rstrip("/").rsplit("/", 1)[-1] if model_path and "/" in model_path else None
+    real = [m["id"] for m in models if not m.get("root") and "current" not in m["id"].lower()]
+    if not loaded and len(real) == 1:
+        loaded = real[0]  # e.g. TabbyAPI behind a proxy without /props: the one real model is what's loaded
+    for m in models:
+        mid = m["id"]
+        if m.get("root"):
+            key = m["root"].rstrip("/").rsplit("/", 1)[-1]
+        elif loaded and "current" in mid.lower():
+            key = loaded
+        else:
+            key = mid
+        MODEL_KEYS[(name, mid)] = key
+    return [m["id"] for m in models]
+
+
+async def resolve_model_key(endpoint: str, model: str) -> str:
+    if (endpoint, model) not in MODEL_KEYS and endpoint in ENDPOINTS:
+        await probe_endpoint(endpoint, ENDPOINTS[endpoint])
+    return MODEL_KEYS.get((endpoint, model), model)
+
+
+def llm_key_of(p: dict) -> Optional[str]:
+    """Rating key of an LLM player from a (possibly archived) game summary."""
+    if p.get("type") != "llm":
+        return None
+    return p.get("rating_key") or MODEL_KEYS.get((p.get("endpoint"), p.get("model"))) or p.get("model")
+
+
+def elo_update(rec: dict, before: float, opp: float, score: float) -> int:
+    k = 40 if rec["games"] < 10 else 24
+    delta = round(k * (score - 1 / (1 + 10 ** ((opp - before) / 400))))
+    rec["rating"] += delta
+    rec["games"] += 1
+    rec["w" if score == 1 else "d" if score == 0.5 else "l"] += 1
+    return delta
+
 # ---------------------------------------------------------------- models
 
 class PlayerSpec(BaseModel):
@@ -96,8 +174,9 @@ class PlayerSpec(BaseModel):
     on_fail: Literal["random", "forfeit"] = "random"
     extra: dict = Field(default_factory=dict)  # merged into the chat request body
     # engines
-    elo: int = 0  # stockfish: 0 = full strength, else 1320..3190
+    elo: int = 0  # stockfish: 0 = full strength, else 300..3190 (below 1320 via the calibrated weak sampler)
     auto: bool = False  # stockfish: play a bit below the opponent's rating, easing off when far ahead
+    rating_key: Optional[str] = None  # llm: set at game creation to the real model behind the id
     commentary: bool = False  # engines: an LLM writes a chat message for each move (uses persona/extra)
     comment_endpoint: Optional[str] = None
     comment_model: Optional[str] = None
@@ -645,8 +724,8 @@ class StockfishPlayer:
     async def start(self):
         _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
         opts = {"Threads": 2, "Hash": 64}
-        if self.spec.elo and not self.spec.auto:
-            opts.update(UCI_LimitStrength=True, UCI_Elo=max(1320, min(3190, self.spec.elo)))
+        if self.spec.elo >= 1320 and not self.spec.auto:
+            opts.update(UCI_LimitStrength=True, UCI_Elo=min(3190, self.spec.elo))
         await self.engine.configure(opts)
 
     async def close(self):
@@ -659,15 +738,16 @@ class StockfishPlayer:
     async def choose(self, board: chess.Board) -> chess.Move:
         t0 = time.time()
         if self.spec.auto:
-            mv = await self.auto_move(board)
+            mv = await self.weak_move(board, self.game.auto_target(self.color), soften_ok=True)
+        elif 0 < self.spec.elo < 1320:
+            mv = await self.weak_move(board, max(300, self.spec.elo), soften_ok=False)
         else:
             mv = (await self.engine.play(board, chess.engine.Limit(time=self.spec.movetime))).move
         self.game.stats[self.side]["seconds"] += time.time() - t0
         engine_comment(self.game, self.spec, self.color, board, mv)
         return mv
 
-    async def auto_move(self, board: chess.Board) -> chess.Move:
-        base = self.game.auto_target(self.color)
+    async def weak_move(self, board: chess.Board, base: float, soften_ok: bool) -> chess.Move:
         if base >= 3190:
             self.game.note_engine_elo(self.side, 3190)
             return (await self.engine.play(board, chess.engine.Limit(time=self.spec.movetime))).move
@@ -676,7 +756,7 @@ class StockfishPlayer:
         infos = await self.engine.analyse(board, chess.engine.Limit(depth=max(depth, 2)), multipv=multipv)
         cand = [(i["pv"][0], i["score"].pov(self.color).score(mate_score=10000)) for i in infos if i.get("pv")]
         best = max(c for _, c in cand)
-        elo = max(200, soften(base, best))
+        elo = max(200, soften(base, best)) if soften_ok else base
         self.game.note_engine_elo(self.side, elo)
         if elo >= 1320:
             limit = chess.engine.Limit(time=self.spec.movetime)
@@ -751,8 +831,11 @@ class Game:
     # ---- ratings / auto strength
     def snapshot_rating(self, side: str):
         spec = self.white if side == "white" else self.black
-        if spec.profile in PROFILES:
+        if spec.type == "human" and spec.profile in PROFILES:
             self.ratings[side] = {"profile": spec.profile, "before": PROFILES[spec.profile]["rating"]}
+        elif spec.type == "llm" and spec.rating_key:
+            rec = LLM_RATINGS.setdefault(spec.rating_key, new_llm_rating(spec.rating_key))
+            self.ratings[side] = {"llm": spec.rating_key, "before": rec["rating"]}
         else:
             self.ratings.pop(side, None)
 
@@ -768,6 +851,8 @@ class Game:
         opp = self.spec_for(not color)
         if opp.type == "human":
             return max(200, self.human_rating(other) - AUTO_BELOW)
+        if opp.type == "llm" and other in self.ratings:
+            return max(300, self.ratings[other]["before"])  # rated models get an even game
         return self.spec_for(color).elo or 3190
 
     def note_engine_elo(self, side: str, elo: float):
@@ -776,7 +861,7 @@ class Game:
     def opp_strength(self, side: str) -> Optional[float]:
         """Rating of `side` as an opponent, for the other side's rating update (None = unrated, e.g. LLMs)."""
         spec = self.white if side == "white" else self.black
-        if spec.type == "human":
+        if spec.type in ("human", "llm"):
             return self.ratings[side]["before"] if side in self.ratings else None
         if spec.type == "stockfish":
             if spec.auto:
@@ -786,26 +871,29 @@ class Game:
         return None
 
     def apply_ratings(self):
-        changed = False
+        touched = set()
+        w, b = self.ratings.get("white", {}), self.ratings.get("black", {})
+        if w.get("llm") and w.get("llm") == b.get("llm"):
+            return  # a model playing itself says nothing about its strength
         for side, other, win in (("white", "black", "1-0"), ("black", "white", "0-1")):
             r = self.ratings.get(side)
             opp = self.opp_strength(other)
-            if not r or opp is None or r["profile"] not in PROFILES:
+            if not r or opp is None:
+                continue
+            rec = PROFILES.get(r["profile"]) if "profile" in r else LLM_RATINGS.get(r.get("llm"))
+            if not rec:
                 continue
             score = 1.0 if self.result == win else 0.5 if self.result == "1/2-1/2" else 0.0
-            p = PROFILES[r["profile"]]
-            k = 40 if p["games"] < 10 else 24
-            delta = round(k * (score - 1 / (1 + 10 ** ((opp - r["before"]) / 400))))
-            p["rating"] += delta
-            p["games"] += 1
-            p["w" if score == 1 else "d" if score == 0.5 else "l"] += 1
+            delta = elo_update(rec, r["before"], opp, score)
             opp_label = (self.black if side == "white" else self.white).label()
-            p["history"].append({"t": time.time(), "rating": p["rating"], "delta": delta, "game": self.id,
-                                 "opp": opp_label, "score": score})
-            r.update(after=p["rating"], delta=delta, opp=round(opp))
-            changed = True
-        if changed:
+            rec["history"].append({"t": time.time(), "rating": rec["rating"], "delta": delta, "game": self.id,
+                                   "opp": opp_label, "score": score})
+            r.update(after=rec["rating"], delta=delta, opp=round(opp))
+            touched.add("profile" if "profile" in r else "llm")
+        if "profile" in touched:
             save_profiles()
+        if "llm" in touched:
+            save_llm_ratings()
 
     def seat_open(self, side: str) -> bool:
         spec = self.white if side == "white" else self.black
@@ -966,18 +1054,17 @@ async def index():
 
 @app.get("/api/config")
 async def config():
-    async def probe(url):
-        try:
-            async with httpx.AsyncClient(timeout=4) as c:
-                r = await c.get(url + "/models", headers={"Authorization": f"Bearer {API_KEY}"})
-                r.raise_for_status()
-                return [m["id"] for m in r.json().get("data", [])]
-        except Exception:
-            return None
+    results = await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))
 
-    results = await asyncio.gather(*(probe(u) for u in ENDPOINTS.values()))
+    def info(name, mid):
+        key = MODEL_KEYS.get((name, mid), mid)
+        rec = LLM_RATINGS.get(key)
+        return {"key": key, "name": key, "rating": rec["rating"] if rec else LLM_START_RATING,
+                "games": rec["games"] if rec else 0}
+
     return {
-        "endpoints": [{"name": n, "url": u, "models": m, "online": m is not None}
+        "endpoints": [{"name": n, "url": u, "models": m, "online": m is not None,
+                       "model_info": {mid: info(n, mid) for mid in (m or [])}}
                       for (n, u), m in zip(ENDPOINTS.items(), results)],
         "max_plies": MAX_PLIES,
     }
@@ -1002,6 +1089,8 @@ def apply_profile(spec: PlayerSpec):
 async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
         apply_profile(spec)
+        if spec.type == "llm" and spec.endpoint and spec.model:
+            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model)
         if spec.type == "human" and not spec.remote:
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):
@@ -1064,11 +1153,17 @@ async def standings():
             p = d[side]
             settings = engine_settings(p)
             pid = p.get("profile") if p.get("profile") in PROFILES else None
-            key = ("profile", pid) if pid else (p["label"], settings)
-            label = PROFILES[pid]["name"] if pid else p["label"]
+            lkey = llm_key_of(p)
+            lrec = LLM_RATINGS.get(lkey) if lkey else None
+            if pid:
+                key, label, rating, emoji = ("profile", pid), PROFILES[pid]["name"], PROFILES[pid]["rating"], PROFILES[pid]["emoji"]
+            elif lrec:
+                key, label, rating, emoji = ("llm", lkey), lrec["name"], lrec["rating"], "🤖"
+                settings = settings or (f"as {p['label']}" if p["label"] != lrec["name"] else "")
+            else:
+                key, label, rating, emoji = (p["label"], settings), p["label"], None, None
             row = table.setdefault(key, {"label": label, "type": p["type"], "settings": settings,
-                                         "profile": pid, "rating": PROFILES[pid]["rating"] if pid else None,
-                                         "emoji": PROFILES[pid]["emoji"] if pid else None,
+                                         "profile": pid, "rating": rating, "emoji": emoji,
                                                             "games": 0, "w": 0, "d": 0, "l": 0, "illegal": 0,
                                                             "random_moves": 0})
             row["games"] += 1
@@ -1245,6 +1340,73 @@ async def human_say(gid: str, req: SayReq, x_client_id: Optional[str] = Header(N
     side = sides[0] if len(sides) == 1 else ("white" if g.board.turn else "black")
     g.add_log({"ply": len(g.board.move_stack), "side": side, "kind": "chat", "say": text, "t": time.time()})
     return {"ok": True}
+
+
+# ---------------------------------------------------------------- llm ratings api
+
+@app.get("/api/llm-ratings")
+async def list_llm_ratings():
+    return sorted(LLM_RATINGS.values(), key=lambda r: -r["rating"])
+
+
+class LlmRatingIn(BaseModel):
+    key: str
+    rating: Optional[int] = None
+    name: Optional[str] = None
+    delete: bool = False
+
+
+@app.post("/api/llm-ratings/update")
+async def update_llm_rating(p: LlmRatingIn):
+    if p.key not in LLM_RATINGS:
+        raise HTTPException(404)
+    if p.delete:
+        LLM_RATINGS.pop(p.key)
+    else:
+        rec = LLM_RATINGS[p.key]
+        if p.name and p.name.strip():
+            rec["name"] = p.name.strip()[:60]
+        if p.rating is not None and p.rating != rec["rating"]:
+            rec["rating"] = max(100, min(3000, p.rating))
+            rec["history"].append({"t": time.time(), "rating": rec["rating"], "manual": True})
+    save_llm_ratings()
+    return {"ok": True}
+
+
+@app.on_event("startup")
+async def backfill_llm_ratings():
+    """First start with LLM ratings: replay the archived games so models start from their past results."""
+    if not LLM_BACKFILL:
+        return
+    await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))
+
+    def strength(p: dict, side: str, d: dict) -> Optional[float]:
+        if p["type"] == "stockfish" and not p.get("auto"):
+            return p.get("elo") or 3200
+        if p["type"] == "lc0":
+            return 3000
+        if p["type"] == "llm":
+            k = llm_key_of(p)
+            return LLM_RATINGS[k]["rating"] if k in LLM_RATINGS else LLM_START_RATING
+        r = (d.get("ratings") or {}).get(side)
+        return r["before"] if r and "before" in r else None
+
+    for d in sorted(ARCHIVE.values(), key=lambda d: d["created"]):
+        if d.get("status") != "finished":
+            continue
+        snap = {side: strength(d[side], side, d) for side in ("white", "black")}
+        if llm_key_of(d["white"]) and llm_key_of(d["white"]) == llm_key_of(d["black"]):
+            continue  # self-play
+        for side, other, win in (("white", "black", "1-0"), ("black", "white", "0-1")):
+            key = llm_key_of(d[side])
+            if not key or snap[other] is None:
+                continue
+            rec = LLM_RATINGS.setdefault(key, new_llm_rating(key))
+            score = 1.0 if d["result"] == win else 0.5 if d["result"] == "1/2-1/2" else 0.0
+            delta = elo_update(rec, snap[side], snap[other], score)
+            rec["history"].append({"t": d["created"], "rating": rec["rating"], "delta": delta, "game": d["id"],
+                                   "opp": d[other]["label"], "score": score, "backfill": True})
+    save_llm_ratings()
 
 
 # ---------------------------------------------------------------- profiles api

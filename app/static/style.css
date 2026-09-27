@@ -391,3 +391,5 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
 .profile-card .stats { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .profile-card .top > div:nth-child(2) { min-width: 0; flex: 1; }
 .profile-card .prating { flex: none; font-size: 18px; padding-right: 2px; }
+h2.section { margin-top: 26px; }
+.rating-note { font-weight: 700; }

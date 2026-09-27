@@ -129,10 +129,20 @@ function renderSide(side) {
     }, ...config.endpoints.map((ep) => h("option", { value: ep.name, selected: ep.name === s.endpoint }, `${ep.name}${ep.online ? "" : " (offline)"}`)));
     if (!config.endpoints.some((e) => e.name === s.endpoint)) epSel.prepend(h("option", { value: s.endpoint, selected: true }, s.endpoint || "—"));
     const ep = config.endpoints.find((x) => x.name === s.endpoint);
-    const dl = h("datalist", { id: `models-${side}` }, ...(ep?.models || []).map((m) => h("option", { value: m })));
+    const mi = (m) => ep?.model_info?.[m];
+    const dl = h("datalist", { id: `models-${side}` }, ...(ep?.models || []).map((m) => h("option", { value: m, label: mi(m) ? `⭐ ${mi(m).rating}${mi(m).key !== m ? ` · ${mi(m).key}` : ""}` : "" })));
+    const ratingNote = h("div", { class: "hint rating-note" });
+    const showRating = () => {
+      const info = mi(s.model);
+      ratingNote.textContent = !s.model ? "" : info
+        ? (info.games ? `⭐ ${info.rating} · ${info.games} rated game${info.games === 1 ? "" : "s"}` : `⭐ ${info.rating} · new model, not rated yet`) + (info.key !== s.model ? ` · plays as ${info.key}` : "")
+        : "Unknown model id — it will be rated as it plays";
+    };
+    showRating();
     box.append(
       h("label", {}, "Endpoint", epSel),
-      h("label", {}, "Model", h("input", { value: s.model || "", list: `models-${side}`, oninput: upd("model") }), dl),
+      h("label", {}, "Model", h("input", { value: s.model || "", list: `models-${side}`, oninput: (e) => { s.model = e.target.value; store.set("setup", setup); showRating(); } }), dl),
+      ratingNote,
       h("div", { class: "grid2" },
         h("label", {}, "Temperature", h("input", { type: "number", step: "0.1", min: "0", max: "2", value: s.temperature, oninput: upd("temperature", num) })),
         h("label", {}, "Max tokens", h("input", { type: "number", step: "256", value: s.max_tokens, oninput: upd("max_tokens", num) }))),
@@ -173,12 +183,12 @@ function renderSide(side) {
     box.append(
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.auto ?? false, onchange: (e) => { s.auto = e.target.checked; store.set("setup", setup); renderSide(side); } }),
         "Auto strength"),
-      s.auto ? h("div", { class: "hint" }, `Plays a bit below the human's rating and eases off when far ahead. The slider is only used against LLMs/engines.`) : null,
+      s.auto ? h("div", { class: "hint" }, `Plays a bit below a human's rating (eases off when far ahead) and even with a rated LLM. The slider is only a fallback.`) : null,
     );
     box.append(
       h("label", {}, "Strength: ", lbl, h("input", {
-        type: "range", min: "1300", max: "3200", step: "50", value: s.elo || 3200,
-        oninput: (e) => { const v = Number(e.target.value); s.elo = v >= 3200 ? 0 : Math.max(1320, v); lbl.textContent = s.elo ? `${s.elo} Elo` : "full strength"; store.set("setup", setup); },
+        type: "range", min: "300", max: "3200", step: "50", value: s.elo || 3200,
+        oninput: (e) => { const v = Number(e.target.value); s.elo = v >= 3200 ? 0 : Math.max(300, v); lbl.textContent = s.elo ? `${s.elo} Elo` : "full strength"; store.set("setup", setup); },
       })),
       h("label", {}, "Seconds per move", h("input", { type: "number", step: "0.1", min: "0.05", value: s.movetime, oninput: upd("movetime", num) })),
     );
@@ -885,6 +895,22 @@ async function renderProfiles() {
         await api(`/api/profiles/${p.id}`, { method: "DELETE" }); await loadProfiles(); renderProfiles(); renderSetup();
       } }, "🗑")))),
     editing === "new" ? profileForm(null) : h("button", { class: "profile-card add", type: "button", onclick: () => { editing = "new"; renderProfiles(); } }, h("span", {}, "＋"), "Add player"));
+  let models = [];
+  try { models = await api("/api/llm-ratings"); } catch {}
+  $("#models").replaceChildren(...(models.length ? models.map((m) => h("div", { class: "profile-card" },
+    h("div", { class: "top" }, h("span", { class: "big-emoji" }, "🤖"),
+      h("div", {}, h("div", { class: "pname", title: m.key }, m.name), h("div", { class: "muted stats" }, `${m.games} game${m.games === 1 ? "" : "s"}`), h("div", { class: "muted stats" }, `${m.w} won · ${m.d} drawn · ${m.l} lost`)),
+      h("div", { class: "prating" }, h("small", {}, "rating"), `⭐ ${m.rating}`)),
+    sparkline(m.history || []),
+    h("div", { class: "row" },
+      h("button", { type: "button", onclick: async () => {
+        const v = prompt(`Set ${m.name}'s rating`, m.rating);
+        if (v && !isNaN(Number(v))) { await api("/api/llm-ratings/update", { method: "POST", body: JSON.stringify({ key: m.key, rating: Number(v) }) }); renderProfiles(); }
+      } }, "✏️ Rating"),
+      h("button", { type: "button", class: "danger", title: "Forget this model's rating", onclick: async () => {
+        if (!confirm(`Reset ${m.name}? It starts again at 600 next game.`)) return;
+        await api("/api/llm-ratings/update", { method: "POST", body: JSON.stringify({ key: m.key, delete: true }) }); renderProfiles();
+      } }, "🗑")))) : [h("div", { class: "muted" }, "No rated models yet — they get a rating after their first finished game against a rated opponent.")]));
 }
 
 // ------------------------------------------------------------ join (network play)

@@ -29,7 +29,12 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
 - Players (👪): profiles with an emoji and a rating (start 1000, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).
-  LLMs and guests are unrated, so games against them don't change ratings.
+  Guests are unrated. LLM models are rated the same way (`data/llm_ratings.json`, new models start at 600),
+  keyed by the real model behind the id: vLLM's `root`, or for "currentmodel"-style aliases the loaded model
+  from `/props` (or the endpoint's only real model). The rating shows when the model is picked in setup, in
+  the player bar, Standings and on the Players page (🤖 Models). Self-play games don't count. On the first
+  start the ratings are rebuilt from the archived games. Auto Stockfish plays even with a rated LLM.
+- Stockfish manual strength goes down to 300 (below 1320 via the same calibrated sampler as auto).
 - Auto Stockfish (default): plays `AUTO_BELOW` (100) Elo under its human opponent's rating and eases off
   mid-game when far ahead (up to −350 Elo at +7.5 pawns). At ≥1320 it uses Stockfish's own `UCI_Elo`; below
   that it samples among its top 8 moves with a softmax whose temperature grows as the rating drops, and
