@@ -20,6 +20,8 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, PrivateAttr
 
+from app import coach
+
 # ---------------------------------------------------------------- config
 
 def parse_endpoints(raw: str) -> dict[str, str]:
@@ -89,6 +91,7 @@ def full_llm_key(model_key: str, endpoint: Optional[str]) -> str:
 
 def new_llm_rating(key: str) -> dict:
     model, _, ep = key.partition(" · ")
+    ep = ep.replace(" · ", ", ")  # "box73 · pure" -> "box73, pure"
     return {"key": key, "name": f"{model.rsplit('/', 1)[-1]}{f' ({ep})' if ep else ''}", "rating": LLM_START_RATING, "games": 0, "w": 0, "d": 0,
             "l": 0, "history": [{"t": time.time(), "rating": LLM_START_RATING}], "created": time.time()}
 
@@ -176,7 +179,8 @@ class PlayerSpec(BaseModel):
     max_tokens: int = 8192
     show_legal: bool = False  # the Stockfish hints below are a clearer shortlist; turn on when hints are off
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
-    engine_hints: bool = True  # legacy field: LLM players always get Stockfish's top 3 (depth 3) + a game overview
+    engine_hints: bool = True  # legacy field
+    pure: bool = False  # llm: no Stockfish hints / overview (the model's own chess); rated separately as "pure"
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
     persona: str = ""  # optional character for the chat messages, e.g. "a friendly pirate"
@@ -213,6 +217,11 @@ class NewGame(BaseModel):
     move_delay: float = 0.6  # min seconds between non-human moves (for watching)
     analysis: bool = True
     start_fen: Optional[str] = None
+    # learning mode: an LLM teacher explains Stockfish's view to the (human) learner; no rating changes
+    learning: bool = False
+    lang: Literal["en", "da"] = "en"
+    teacher_endpoint: Optional[str] = None
+    teacher_model: Optional[str] = None
 
 
 class HumanMove(BaseModel):
@@ -526,7 +535,7 @@ SAY: <your message>
 The message is 1-2 short sentences (at most 25 words) that react to the opponent's last move and/or announce your
 own move in a cute, funny, kind way that fits the position (proud of a capture, "oops!" after losing a piece,
 excited about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and
-kid-friendly: never mean, scary or rude. Speak in character{persona}.
+kid-friendly: never mean, scary or rude. Speak in character{persona}. {lang}
 Vary your messages: start each one differently (not "Wow", "Hello" or the same exclamation every time) and
 don't repeat what you said in your recent messages."""
 
@@ -572,7 +581,8 @@ class LLMPlayer:
         sp = SYSTEM_PROMPT.format(color=cname)
         if self.spec.chat:
             persona = self.spec.persona.strip()
-            sp += CHAT_PROMPT.format(persona=f" as {persona}" if persona else " as a cheerful chess buddy")
+            sp += CHAT_PROMPT.format(persona=f" as {persona}" if persona else " as a cheerful chess buddy",
+                                     lang=chat_lang_line(self.game))
         return sp
 
     def build_prompt(self, board: chess.Board, rejected: list[str], advice: Optional[list[dict]] = None) -> list[dict]:
@@ -591,7 +601,8 @@ class LLMPlayer:
                      f"{board_diagram(board)}")
         if board.is_check():
             parts.append("You are in CHECK - you must get out of check.")
-        parts.append("Game overview:\n" + game_overview(board, self.color))
+        if not self.spec.pure:
+            parts.append("Game overview:\n" + game_overview(board, self.color))
         if self.spec.hints:
             parts.append("Position facts (plain facts computed from the board, no evaluation - you must still choose the move yourself):\n" + position_facts(board, self.color))
         if advice:
@@ -601,6 +612,9 @@ class LLMPlayer:
                          + "\nThese are strong. Normally play one of them; only deviate for a clear reason.")
         if self.spec.show_legal:
             parts.append("Legal moves, by piece:\n" + legal_by_piece(board))
+        if self.spec.chat and getattr(self, "unread", None):
+            parts.append("The players wrote in the chat since your last move - answer them (kindly, briefly) in your "
+                         "SAY line:\n" + "\n".join(f"- {m}" for m in self.unread))
         if self.spec.chat:
             mine = [e["say"] for e in self.game.log if e.get("side") == ("white" if self.color else "black")
                     and e.get("say") and e.get("kind") != "chat"][-3:]
@@ -628,7 +642,8 @@ class LLMPlayer:
         side = "white" if self.color else "black"
         stats = self.game.stats[side]
         attempt, net_fails = 0, 0
-        advice = await ADVISOR.top_moves(board)
+        advice = None if self.spec.pure else await ADVISOR.top_moves(board)
+        self.unread = unread_chat(self.game, "white" if self.color else "black") if self.spec.chat else []
         async with httpx.AsyncClient(timeout=httpx.Timeout(900, connect=10)) as client:
             while attempt <= self.spec.retries:
                 messages = self.build_prompt(board, rejected, advice)
@@ -726,11 +741,26 @@ def soften(elo: float, advantage_cp: int) -> float:
     return elo - min(1.0, (advantage_cp - 150) / 600) * 350
 
 
+def unread_chat(game, side: str) -> list[str]:
+    """Players' chat messages the LLM on `side` hasn't answered yet (it answers once, with its next move)."""
+    seen = game.chat_seen.get(side, 0)
+    game.chat_seen[side] = len(game.log)
+    return [f"{game.spec_for(e['side'] == 'white').label()}: {e['say']}"
+            for e in game.log[seen:] if e.get("kind") == "chat" and e.get("side") != side]
+
+
+def chat_lang_line(game) -> str:
+    """The game's language for chat lines (the MOVE line stays in chess notation)."""
+    if getattr(game, "opts", None) and game.opts.lang == "da":
+        return "Write the chat message in Danish (dansk). Any MOVE line stays in standard English chess notation."
+    return "Write the chat message in English."
+
+
 COMMENT_PROMPT = """You are {persona}. You are the chess engine {engine}, playing {color} against {opp} in a game \
 watched by children. You just made a move. Write ONE short chat message (1-2 sentences, at most 25 words) that \
 reacts to what just happened in a cute, funny, kind way (proud of a capture, "oops" after losing a piece, excited \
 about a check, a friendly compliment for a good opponent move). Emojis are welcome. Be sporting and kid-friendly: \
-never mean, scary or rude. Reply with only the message."""
+never mean, scary or rude. Reply with only the message. {lang}"""
 
 COMMENT_TASKS: set = set()  # keep references so fire-and-forget tasks aren't garbage collected
 
@@ -777,12 +807,16 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
         facts.append(f"Your feeling about the position: {mood}.")
     if after.is_checkmate():
         facts.append("This move wins the game!")
+    unread = unread_chat(game, side)
+    if unread:
+        facts.append("The players wrote in the chat since your last move - answer them kindly and briefly in "
+                     "your message:\n" + "\n".join(f"- {m}" for m in unread))
     opp = game.spec_for(not color).label()
     persona = spec.persona.strip() or "a cheerful chess buddy"
     body = {
         "model": spec.comment_model,
         "messages": [
-            {"role": "system", "content": COMMENT_PROMPT.format(persona=persona, engine=spec.label(),
+            {"role": "system", "content": COMMENT_PROMPT.format(persona=persona, engine=spec.label(), lang=chat_lang_line(game),
                                                                 color="White" if color else "Black", opp=opp)},
             {"role": "user", "content": "\n".join(facts)},
         ],
@@ -915,6 +949,9 @@ class Game:
         self.host: Optional[str] = None  # client id of the device that created it
         self.ratings: dict[str, dict] = {}  # side -> {"profile", "before", "after", "delta"}
         self.engine_elo: dict[str, list[float]] = {"white": [], "black": []}
+        self.review: Optional[dict] = None  # learning mode: a blunder waiting for "undo" / "keep"
+        self.chat_seen: dict[str, int] = {}  # side -> log length when its LLM last read the players' chat
+        self.review_decisions: asyncio.Queue = asyncio.Queue()
 
     def touch(self):
         self.version += 1
@@ -964,6 +1001,8 @@ class Game:
         return None
 
     def apply_ratings(self):
+        if self.opts.learning:
+            return  # take-backs and hints: learning games never change ratings
         touched = set()
         w, b = self.ratings.get("white", {}), self.ratings.get("black", {})
         if w.get("llm") and w.get("llm") == b.get("llm"):
@@ -1056,9 +1095,17 @@ class Game:
                     return self.finish("0-1" if b.turn else "1-0", f"{loser} {why}")
                 if spec.type != "human":
                     await asyncio.sleep(max(0, self.opts.move_delay - (time.time() - t0)))
+                rev = None
+                if self.opts.learning and spec.type == "human":
+                    rev = await self.check_learner_move(b, mv)
+                    if rev == "undo":
+                        continue  # the learner moves again
+                before = b.copy()
                 b.push(mv)
                 self.thinking_since = None
                 self.touch()
+                if self.opts.learning and not (isinstance(rev, dict) and rev.get("explained")):
+                    coach.background(coach.explain_move(self, before, mv, rev if isinstance(rev, dict) else None))
                 if self.opts.analysis:
                     self.evals.append(await ANALYZER.evaluate(b))
                     self.touch()
@@ -1077,6 +1124,29 @@ class Game:
             for p in players.values():
                 await p.close()
 
+    async def check_learner_move(self, b: chess.Board, mv: chess.Move):
+        """Learning mode: pause on a blunder so the learner can take it back. Returns the review, or "undo"."""
+        try:
+            rev = await coach.review(b, mv, b.turn)
+        except Exception:
+            return None
+        if rev["cls"] != "blunder" or (rev["cp_before"] or 0) < -600:
+            return rev  # not a blunder, or already lost: no point interrupting
+        lang = self.opts.lang if self.opts.lang in coach.TEXT else "en"
+        self.review = {**rev, "ply": len(b.move_stack), "uci": mv.uci(), "text": None,
+                       "side": "white" if b.turn else "black"}
+        self.thinking_since = time.time()
+        self.touch()
+        coach.background(coach.explain_blunder(self, b, rev))
+        decision = await self.review_decisions.get()
+        text = self.review.get("text") if self.review else None
+        self.review = None
+        if text:  # decided before the explanation arrived: the kept move still gets its normal explanation
+            coach.add_teach(self, text, rev["arrows"], rev["squares"], about=rev["san"], cls="blunder",
+                            mover="kid", blunder=True, decision=decision)
+        coach.add_teach(self, coach.TEXT[lang]["undone" if decision == "undo" else "kept"], note=True)
+        return "undo" if decision == "undo" else {**rev, "explained": bool(text)}
+
     def state(self, full: bool = True, cid: Optional[str] = None) -> dict:
         b = self.board
         human_turn = self.status == "running" and self.awaiting_human and self.can_move(cid, b.turn)
@@ -1090,6 +1160,7 @@ class Game:
             "open_seats": [side for side in ("white", "black") if self.seat_open(side)],
             "remote_sides": [side for side, sp in (("white", self.white), ("black", self.black))
                              if sp.type == "human" and sp.remote],
+            "learning": self.opts.learning,
         }
         if not full:
             return s
@@ -1110,6 +1181,8 @@ class Game:
                       if sp.type == "human" and cid and sp._seat == cid],
             is_host=bool(cid and cid == self.host),
             engine_now={side: round(e[-1]) for side, e in self.engine_elo.items() if e},
+            lang=self.opts.lang,
+            review=dict(self.review) if self.review else None,
         )
         return s
 
@@ -1220,7 +1293,7 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
         apply_profile(spec)
         if spec.type == "llm" and spec.endpoint and spec.model:
-            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model)
+            spec.rating_key = await resolve_model_key(spec.endpoint, spec.model) + (" · pure" if spec.pure else "")
         if spec.type == "human" and not spec.remote:
             spec._seat = x_client_id
         if spec.type == "llm" and (not spec.endpoint or not spec.model):
@@ -1230,6 +1303,12 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
             chess.Board(req.start_fen)
         except ValueError:
             raise HTTPException(400, "invalid FEN")
+    if req.learning:
+        if "human" not in (req.white.type, req.black.type):
+            raise HTTPException(400, "learning mode needs a human player")
+        req.teacher_endpoint = req.teacher_endpoint or next(iter(ENDPOINTS), None)
+        if not req.teacher_endpoint or req.teacher_endpoint not in ENDPOINTS:
+            raise HTTPException(400, "learning mode needs a teacher LLM endpoint")
     n = max(1, min(100, req.games))
     match_id = uuid.uuid4().hex[:8]
     code = new_code() if "human" in (req.white.type, req.black.type) else None
@@ -1251,7 +1330,7 @@ def all_summaries():
     for gid, g in GAMES.items():
         out[gid] = g.state(full=False)
     keys = ("id", "match_id", "index", "white", "black", "status", "result", "termination",
-            "plies", "created", "stats")
+            "plies", "created", "stats", "learning")
     return sorted(({k: d.get(k) for k in keys} for d in out.values()),
                   key=lambda d: d["created"], reverse=True)
 
@@ -1277,7 +1356,7 @@ def engine_settings(p: dict) -> str:
 async def standings():
     table: dict[tuple, dict] = {}
     for d in all_summaries():
-        if d["status"] != "finished":
+        if d["status"] != "finished" or d.get("learning"):
             continue
         for side, other, win in (("white", "black", "1-0"), ("black", "white", "0-1")):
             p = d[side]
@@ -1469,6 +1548,65 @@ async def human_say(gid: str, req: SayReq, x_client_id: Optional[str] = Header(N
         raise HTTPException(403, "only players can chat")
     side = sides[0] if len(sides) == 1 else ("white" if g.board.turn else "black")
     g.add_log({"ply": len(g.board.move_stack), "side": side, "kind": "chat", "say": text, "t": time.time()})
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- learning mode api
+
+class ReviewReq(BaseModel):
+    decision: Literal["undo", "keep"]
+
+
+class AskReq(BaseModel):
+    text: str
+
+
+class LangReq(BaseModel):
+    lang: Literal["en", "da"]
+
+
+def learning_game(gid: str, cid: Optional[str]) -> Game:
+    g = get_game(gid)
+    if not g.opts.learning:
+        raise HTTPException(400, "not a learning game")
+    color, _ = coach.learner(g)
+    spec = g.spec_for(color)
+    if spec._seat is not None and spec._seat != cid:
+        raise HTTPException(403, "only the learner's device can do that")
+    return g
+
+
+@app.post("/api/games/{gid}/review")
+async def review_decision(gid: str, req: ReviewReq, x_client_id: Optional[str] = Header(None)):
+    g = learning_game(gid, x_client_id)
+    if not g.review:
+        raise HTTPException(409, "nothing to review")
+    await g.review_decisions.put(req.decision)
+    return {"ok": True}
+
+
+@app.post("/api/games/{gid}/hint")
+async def learning_hint(gid: str, x_client_id: Optional[str] = Header(None)):
+    g = learning_game(gid, x_client_id)
+    coach.background(coach.hint(g))
+    return {"ok": True}
+
+
+@app.post("/api/games/{gid}/ask")
+async def learning_ask(gid: str, req: AskReq, x_client_id: Optional[str] = Header(None)):
+    g = learning_game(gid, x_client_id)
+    text = req.text.strip()[:300]
+    if not text:
+        raise HTTPException(400, "empty question")
+    coach.background(coach.answer(g, text))
+    return {"ok": True}
+
+
+@app.post("/api/games/{gid}/lang")
+async def learning_lang(gid: str, req: LangReq, x_client_id: Optional[str] = Header(None)):
+    g = learning_game(gid, x_client_id)
+    g.opts.lang = req.lang
+    g.touch()
     return {"ok": True}
 
 

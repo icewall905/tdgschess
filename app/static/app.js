@@ -59,6 +59,19 @@ const DEFAULTS = {
   stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
+let learnCfg = store.get("learn", { on: false, endpoint: null, model: null });
+let lang = "en";  // chat lines, engine comments and the teacher; English unless Danish is picked for this game
+const T = {
+  en: { teacher: "Teacher", you: "You", hint: "💡 Hint", explain: "❓ Explain last move", explainQ: "Can you explain the last move?",
+        ask: "Ask the teacher…", send: "Ask", thinking: "The teacher is thinking…", oops: "Oops! That move is a big mistake",
+        undo: "↩️ Take it back", keep: "Keep it", waitingText: "The teacher is looking at it…", better: "Better moves",
+        waitKid: "Waiting for the player to decide…", empty: "The teacher explains every move here. Ask anything!" },
+  da: { teacher: "Lærer", you: "Dig", hint: "💡 Hjælp", explain: "❓ Forklar sidste træk", explainQ: "Kan du forklare det sidste træk?",
+        ask: "Spørg læreren…", send: "Spørg", thinking: "Læreren tænker…", oops: "Hov! Det træk er en stor fejl",
+        undo: "↩️ Tag trækket tilbage", keep: "Behold det", waitingText: "Læreren kigger på det…", better: "Bedre træk",
+        waitKid: "Venter på at spilleren bestemmer sig…", empty: "Læreren forklarer hvert træk her. Spørg om alt!" },
+};
+const tr = (k) => (T[game?.lang || lang] || T.en)[k];
 for (const side of ["white", "black"]) {
   if (!DEFAULTS[setup[side]?.type]) setup[side] = { ...DEFAULTS.stockfish };  // Lc0 was removed
   if (setup[side].type === "llm" && setup[side].engine_hints === undefined) Object.assign(setup[side], { engine_hints: true, show_legal: false });  // hints became the default
@@ -151,7 +164,12 @@ function renderSide(side) {
         h("label", {}, "Max tokens", h("input", { type: "number", step: "256", value: s.max_tokens, oninput: upd("max_tokens", num) }))),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.show_legal, onchange: upd("show_legal") }), "Give legal move list in prompt"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.hints ?? true, onchange: upd("hints") }), "Give position facts (material, hanging pieces, checks, captures)"),
-      h("div", { class: "hint" }, "Gets Stockfish's top 3 moves (shallow depth-3 search) and a game overview each move."),
+      h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.pure, onchange: (e) => {
+        s.pure = e.target.checked;
+        s.show_legal = s.pure;  // without the engine's shortlist the legal-move list helps small models
+        store.set("setup", setup); renderSide(side);
+      } }), "🧪 Pure LLM (no Stockfish hints)"),
+      h("div", { class: "hint" }, s.pure ? "Plays on its own chess knowledge; rated separately as \"pure\"." : "Gets Stockfish's top 3 moves (shallow depth-3 search) and a game overview each move."),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: !!s.vision, onchange: upd("vision") }), "Send board image (vision models only)"),
       h("label", { class: "chk" }, h("input", { type: "checkbox", checked: s.chat ?? true, onchange: upd("chat") }), "Chat message with each move 💬"),
       h("label", {}, "Chat character (optional)", h("input", { value: s.persona || "", placeholder: "e.g. a friendly pirate, a sleepy cat", oninput: upd("persona") })),
@@ -203,9 +221,37 @@ function renderSide(side) {
 function renderSetup() {
   renderSide("white");
   renderSide("black");
+  renderLearnCard();
+  renderLang();
   $("#endpoints").replaceChildren(h("div", {}, "Endpoints:"), ...config.endpoints.map((ep) =>
     h("div", {}, h("span", { class: "dot", style: `background:${ep.online ? "var(--good)" : "var(--bad)"}` }),
       `${ep.name} — ${ep.url} ${ep.online ? `(${ep.models.length} model${ep.models.length === 1 ? "" : "s"})` : "(offline)"}`)));
+}
+
+function renderLearnCard() {
+  const box = $("#learn-card");
+  const save = () => { store.set("learn", learnCfg); renderLearnCard(); };
+  box.replaceChildren(h("label", { class: "chk big" }, h("input", { type: "checkbox", checked: !!learnCfg.on, onchange: (e) => { learnCfg.on = e.target.checked; save(); } }),
+    "🎓 Learning mode (a teacher explains every move)"));
+  box.classList.toggle("on", !!learnCfg.on);
+  if (!learnCfg.on) return;
+  if (!learnCfg.endpoint) {
+    const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
+    if (ep) { learnCfg.endpoint = ep.name; learnCfg.model = ep.models?.[0] || ""; store.set("learn", learnCfg); }
+  }
+  const ep = config.endpoints.find((x) => x.name === learnCfg.endpoint);
+  box.append(
+    h("div", { class: "hint" }, "Stockfish works out the facts, the teacher LLM explains them. Very bad moves pause the game so they can be taken back. Learning games don't change ratings."),
+    h("div", { class: "grid2" },
+      h("label", {}, "Teacher endpoint", h("select", {
+        onchange: (e) => { learnCfg.endpoint = e.target.value; const x = config.endpoints.find((y) => y.name === learnCfg.endpoint); if (x?.models?.length) learnCfg.model = x.models[0]; save(); },
+      }, ...config.endpoints.map((x) => h("option", { value: x.name, selected: x.name === learnCfg.endpoint }, `${x.name}${x.online ? "" : " (offline)"}`)))),
+      h("label", {}, "Teacher model", h("input", { value: learnCfg.model || "", list: "teach-models", oninput: (e) => { learnCfg.model = e.target.value; store.set("learn", learnCfg); } }),
+        h("datalist", { id: "teach-models" }, ...(ep?.models || []).map((m) => h("option", { value: m }))))));
+}
+
+function renderLang() {
+  $$("#opt-lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === lang));
 }
 
 function applyPreset(p) {
@@ -215,7 +261,10 @@ function applyPreset(p) {
     "llm-llm": { white: llm(0), black: llm(1) },
     "llm-sf": { white: llm(0), black: { ...DEFAULTS.stockfish, elo: 1400 } },
     "me-sf": { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.stockfish } },
+    learn: { white: { ...DEFAULTS.human, profile: setup.white?.profile || setup.black?.profile || null }, black: { ...DEFAULTS.stockfish, auto: true } },
   }[p];
+  learnCfg.on = p === "learn";
+  store.set("learn", learnCfg);
   $("#opt-games").value = p === "llm-llm" || p === "llm-sf" ? 2 : 1;
   store.set("setup", setup);
   renderSetup();
@@ -231,7 +280,12 @@ async function startGame() {
       move_delay: Number($("#opt-delay").value) || 0,
       analysis: $("#opt-analysis").checked,
       start_fen: $("#opt-fen").value.trim() || null,
+      lang,
+      learning: !!learnCfg.on,
+      teacher_endpoint: learnCfg.on ? learnCfg.endpoint : null,
+      teacher_model: learnCfg.on ? learnCfg.model : null,
     };
+    if (body.learning && setup.white.type !== "human" && setup.black.type !== "human") throw new Error("Learning mode needs a human player (you!)");
     const r = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
     openGame(r.ids[0]);
   } catch (e) { $("#setup-err").textContent = e.message; }
@@ -289,16 +343,53 @@ function renderBoard() {
   animFrom = null;
   // hint arrow
   const ev = game?.evals?.[ply];
-  if ($("#show-best").checked && ev?.best) {
-    board.append(arrowSvg(ev.best));
-  }
+  const marks = boardMarks(ply);
+  if ($("#show-best").checked && ev?.best) marks.arrows.push({ from: ev.best.slice(0, 2), to: ev.best.slice(2, 4), color: "green" });
+  for (const sq of marks.squares) $(`.sq[data-sq=${sq}]`, board)?.classList.add("mark");
+  if (marks.arrows.length) board.append(arrowsSvg(marks.arrows));
   renderEval();
+  renderReview();
 }
 
 function sqXY(sq) {
   let x = FILES.indexOf(sq[0]), y = 8 - Number(sq[1]);
   if (orientation === "black") { x = 7 - x; y = 7 - y; }
   return [x * 100 + 50, y * 100 + 50];
+}
+
+const ARROW_COLORS = { green: "rgba(21,140,40,.78)", red: "rgba(220,40,40,.8)", orange: "rgba(240,140,20,.8)", blue: "rgba(40,110,230,.75)" };
+
+// arrows/highlights to show: a pending blunder review, else the teacher entry the user clicked,
+// else the latest teacher entry for the position on screen
+let selectedTeach = null;
+function boardMarks(ply) {
+  const out = { arrows: [], squares: [] };
+  if (!game?.learning) return out;
+  let src = null;
+  if (game.review && ply === game.san.length) src = game.review;
+  else if (selectedTeach != null) src = game.log[selectedTeach];
+  else src = [...game.log].reverse().find((e) => e.kind === "teach" && e.arrows?.length && e.ply === ply && ply === game.san.length);
+  if (src) { out.arrows = [...(src.arrows || [])]; out.squares = [...(src.squares || [])]; }
+  return out;
+}
+
+function arrowsSvg(list) {
+  const ns = "http://www.w3.org/2000/svg";
+  const svg = document.createElementNS(ns, "svg");
+  svg.setAttribute("class", "arrows");
+  svg.setAttribute("viewBox", "0 0 800 800");
+  for (const a of list) {
+    const [x1, y1] = sqXY(a.from), [x2, y2] = sqXY(a.to);
+    const ang = Math.atan2(y2 - y1, x2 - x1), len = Math.hypot(x2 - x1, y2 - y1) - 30;
+    const g = document.createElementNS(ns, "g");
+    g.setAttribute("transform", `translate(${x1},${y1}) rotate(${(ang * 180) / Math.PI})`);
+    g.setAttribute("fill", ARROW_COLORS[a.color] || ARROW_COLORS.green);
+    const path = document.createElementNS(ns, "path");
+    path.setAttribute("d", `M0,-9 L${len},-9 L${len},-22 L${len + 30},0 L${len},22 L${len},9 L0,9 Z`);
+    g.append(path);
+    svg.append(g);
+  }
+  return svg;
 }
 
 function arrowSvg(uci) {
@@ -601,7 +692,7 @@ function renderLog(force) {
   const sig = `${game.id}:${game.log.length}:${showR}`;
   if (sig === logSig && !force) return;
   logSig = sig;
-  el.replaceChildren(...game.log.filter((e) => e.kind !== "chat" && e.kind !== "comment").map((e) => {
+  el.replaceChildren(...game.log.filter((e) => !["chat", "comment", "teach", "ask"].includes(e.kind)).map((e) => {
     const moveNo = `${Math.floor(e.ply / 2) + 1}${e.side === "white" ? "." : "…"}`;
     return h("div", { class: `entry ${e.side}${e.error ? " error" : ""}` },
       h("div", { class: "h" },
@@ -718,14 +809,88 @@ function renderReact() {
     h("form", { onsubmit: (e) => { e.preventDefault(); say(input.value); input.value = ""; } }, input, h("button", { type: "submit" }, "Send")));
 }
 
+const learnerSide = () => (game?.white.type === "human" ? "white" : "black");
+const isLearner = () => !!game?.learning && !!game.my_sides?.includes(learnerSide());
+
+function renderReview() {
+  const el = $("#review");
+  const r = game?.review;
+  if (!r || viewPly != null && viewPly !== game.san.length) { el.hidden = true; return; }
+  el.hidden = false;
+  const mine = isLearner();
+  const decide = async (decision) => {
+    el.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    try { await api(`/api/games/${game.id}/review`, { method: "POST", body: JSON.stringify({ decision }) }); } catch (e) { alert(e.message); }
+    poll(true);
+  };
+  el.replaceChildren(
+    h("div", { class: "rv-title" }, `😮 ${tr("oops")}: ${r.san}`),
+    r.text ? h("div", { class: "rv-text" }, r.text) : h("div", { class: "rv-text muted" }, h("span", { class: "dots" }, h("i"), h("i"), h("i")), " ", tr("waitingText")),
+    r.better?.length ? h("div", { class: "rv-better" }, `${tr("better")}: `, ...r.better.map((b) => h("b", {}, b.san))) : null,
+    mine ? h("div", { class: "rv-actions" },
+      h("button", { class: "primary", type: "button", onclick: () => decide("undo") }, tr("undo")),
+      h("button", { type: "button", onclick: () => decide("keep") }, tr("keep")))
+      : h("div", { class: "muted" }, tr("waitKid")));
+}
+
+let teachSig = "", teachPending = 0, teachStick = true;
+function renderTeach(force) {
+  const el = $("#teach"), ctl = $("#teach-controls");
+  $(".tabs [data-tab=teach]").hidden = !game?.learning;
+  if (!game?.learning) { el.replaceChildren(); ctl.hidden = true; teachSig = ""; return; }
+  $$("#teach-lang button").forEach((b) => b.classList.toggle("active", b.dataset.lang === game.lang));
+  const entries = game.log.map((e, i) => ({ ...e, i })).filter((e) => e.kind === "teach" || e.kind === "ask");
+  const sig = `${game.id}:${entries.length}:${selectedTeach}:${teachPending}:${game.lang}`;
+  if (sig === teachSig && !force) return;
+  const firstLoad = !teachSig.startsWith(game.id + ":");
+  teachSig = sig;
+  const kid = game[learnerSide()];
+  const items = entries.length ? entries.map((e) => {
+    if (e.note) return h("div", { class: "note" }, e.say);
+    if (e.kind === "ask") return h("div", { class: "msg black human" }, playerAvatar(learnerSide(), kid),
+      h("div", { class: "bubble" }, h("div", { class: "who" }, kid.label), h("div", { class: "txt" }, e.say)));
+    const cls = ["msg white teacher", e.blunder ? "blunder" : "", e.i === selectedTeach ? "cur" : "", e.arrows?.length ? "has-arrows" : ""].join(" ");
+    return h("div", { class: cls, onclick: () => { selectedTeach = selectedTeach === e.i ? null : e.i; renderTeach(true); renderBoard(); } },
+      h("span", { class: "av emoji" }, "🎓"),
+      h("div", { class: "bubble" },
+        h("div", { class: "who" }, tr("teacher"), e.about ? h("span", { class: "chip" }, e.about) : null,
+          e.cls && e.cls !== "good" ? h("span", { class: `chip q-${e.cls}` }, e.cls) : null, e.arrows?.length ? "🏹" : null),
+        h("div", { class: "txt" }, e.say)));
+  }) : [h("div", { class: "empty" }, h("b", {}, "🎓"), tr("empty"))];
+  if (teachPending) items.push(h("div", { class: "msg white teacher typing" }, h("span", { class: "av emoji" }, "🎓"),
+    h("div", { class: "bubble" }, h("div", { class: "who" }, tr("thinking")), h("div", { class: "dots" }, h("i"), h("i"), h("i")))));
+  el.replaceChildren(...items);
+  if (firstLoad) teachStick = true;
+  if (teachStick) el.scrollTop = el.scrollHeight;
+  // controls: only the learner's device can ask
+  const tab = store.get("infoTab", "chat");
+  ctl.hidden = tab !== "teach" || !isLearner();
+  if (ctl.hidden || ctl.dataset.game === game.id + game.lang) return;
+  ctl.dataset.game = game.id + game.lang;
+  const ask = async (path, body) => {
+    teachPending++; renderTeach(true);
+    try { await api(`/api/games/${game.id}/${path}`, { method: "POST", body: JSON.stringify(body || {}) }); }
+    catch (e) { teachPending--; alert(e.message); }
+  };
+  const input = h("input", { placeholder: tr("ask"), maxlength: "300" });
+  ctl.replaceChildren(
+    h("div", { class: "row" },
+      h("button", { type: "button", onclick: () => ask("hint") }, tr("hint")),
+      h("button", { type: "button", onclick: () => ask("ask", { text: tr("explainQ") }) }, tr("explain"))),
+    h("form", { onsubmit: (e) => { e.preventDefault(); if (input.value.trim()) ask("ask", { text: input.value.trim() }); input.value = ""; } },
+      input, h("button", { type: "submit" }, tr("send"))));
+}
+
 function setTab(tab) {
   store.set("infoTab", tab);
-  $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
-  $$(".tabs label[data-for]").forEach((l) => { l.hidden = l.dataset.for !== tab; });
+  $$(".tabs [data-tab]").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+  $$(".tabs [data-for]").forEach((l) => { l.hidden = l.dataset.for !== tab; });
   $("#chat").hidden = tab !== "chat";
   if (game) renderReact();
   $("#log").hidden = tab !== "log";
-  if (tab === "chat") renderChat(true); else renderLog(true);
+  $("#teach").hidden = tab !== "teach";
+  $("#teach-controls").dataset.game = "";
+  if (tab === "chat") renderChat(true); else if (tab === "teach") renderTeach(true); else renderLog(true);
 }
 
 function renderAll() {
@@ -735,6 +900,7 @@ function renderAll() {
   renderMoves();
   renderLog();
   renderChat();
+  renderTeach();
 }
 
 function setView(ply) {
@@ -771,7 +937,14 @@ async function poll(force = false) {
     const prev = first ? null : game;
     if (!first && s.version < prev.version) return;  // an older long-poll answer arriving late
     s._recv = performance.now();
+    if (!first && teachPending) {
+      const answers = (x) => x.log.filter((e) => e.kind === "teach" && (e.reply_to || e.kind_detail === "hint")).length;
+      teachPending = Math.max(0, teachPending - (answers(s) - answers(prev)));
+    }
+    if (first) { selectedTeach = null; teachPending = 0; }
     game = s;
+    if (first && s.learning) setTab("teach");
+    else if (first && store.get("infoTab", "chat") === "teach" && !s.learning) setTab("chat");
     if (prev && !prev.human_turn && game.human_turn && game.my_sides?.length) navigator.vibrate?.(120);
     if (prev && prev.open_seats?.length && !game.open_seats?.length) sound("check");
     if (prev && viewPly == null && game.san.length === prev.san.length + 1) {
@@ -821,7 +994,7 @@ async function renderGames() {
       h("td", {}, fmtTime(g.created)),
       h("td", {}, h("span", { class: "who-cell" }, avatar("white"), g.white.label, g.result === "1-0" ? " 🏆" : "")),
       h("td", {}, h("span", { class: "who-cell" }, avatar("black"), g.black.label, g.result === "0-1" ? " 🏆" : "")),
-      h("td", { class: "res" }, g.result), h("td", {}, g.plies),
+      h("td", { class: "res" }, g.result, g.learning ? h("span", { class: "pill learn", title: "Learning game (not rated)" }, "🎓") : null), h("td", {}, g.plies),
       h("td", {}, h("span", { class: `pill ${g.status}` }, g.status)),
       h("td", { class: "muted", title: g.termination || "" }, g.termination || ""),
       h("td", {}, ["finished", "aborted", "error"].includes(g.status) ? h("button", {
@@ -1024,7 +1197,14 @@ $("#nav-last").onclick = () => setView(Infinity);
 $("#flip").onclick = () => { orientation = orientation === "white" ? "black" : "white"; manualFlip = true; renderAll(); };
 $("#sound").onchange = () => { store.set("sound", $("#sound").checked); if ($("#sound").checked) sound("move"); };
 $("#show-best").onchange = () => { store.set("showBest", $("#show-best").checked); renderBoard(); };
-$$(".tabs button").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+$$(".tabs [data-tab]").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
+$$("#opt-lang button").forEach((b) => { b.onclick = () => { lang = b.dataset.lang; renderLang(); }; });
+$$("#teach-lang button").forEach((b) => { b.onclick = async () => {
+  if (!game?.learning) return;
+  try { await api(`/api/games/${game.id}/lang`, { method: "POST", body: JSON.stringify({ lang: b.dataset.lang }) }); } catch (e) { alert(e.message); }
+  poll(true);
+}; });
+$("#teach").addEventListener("scroll", () => { const el = $("#teach"); teachStick = el.scrollHeight - el.scrollTop - el.clientHeight < 60; });
 $("#chat").addEventListener("scroll", () => {
   const el = $("#chat");
   chatStick = el.scrollHeight - el.scrollTop - el.clientHeight < 60;

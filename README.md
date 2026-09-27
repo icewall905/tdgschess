@@ -30,6 +30,20 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
 - Engine chat: Stockfish can have "Chat comments by an LLM" — after each engine move an LLM (endpoint +
   model + optional character) writes a kid-friendly chat line from move facts, material and the eval bar's
   score. It runs in the background, so the engine never waits for it; the comment appears when it arrives.
+- 🎓 Learning mode (preset "Learn with a teacher", or the Learning mode box): the kid plays auto Stockfish and
+  an LLM teacher (endpoint/model picked in setup, thinking switched off) explains every move in 1-2 sentences.
+  All chess facts come from Stockfish (`app/coach.py`): evaluation, top moves + plans, threats (null-move search),
+  pieces in danger, and a review of each of the kid's moves (win-probability loss: blunder/mistake/inaccuracy,
+  what it allows, forks, missed mates, better moves). A blunder pauses the game before the engine replies and
+  shows arrows (red = the move, orange = the punishment, green = better moves) with "Take it back" / "Keep it".
+  The Teacher tab has 💡 Hint (engine-backed suggestions with arrows), ❓ Explain, and free questions — moves the
+  kid mentions ("what if Nf3?", Danish letters too) are checked by Stockfish first. Learning games don't change
+  ratings and are left out of Standings.
+- Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments and the teacher
+  (the teacher can also switch mid-game).
+- LLM chat replies: players' chat messages are answered by the LLM (or the engine's LLM commentator) once, in its
+  chat line with its next move — no extra calls, the game keeps moving.
+- Pure LLM toggle: no Stockfish hints/overview (legal-move list on); rated separately as "…, pure".
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).

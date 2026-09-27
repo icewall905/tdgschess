@@ -393,3 +393,54 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
 .profile-card .prating { flex: none; font-size: 18px; padding-right: 2px; }
 h2.section { margin-top: 26px; }
 .rating-note { font-weight: 700; }
+
+/* ------------------------------------------------------------ learning mode */
+.presets .learn-preset { grid-column: 1 / -1; background: linear-gradient(135deg, color-mix(in srgb, var(--good) 18%, var(--card)), color-mix(in srgb, var(--accent) 14%, var(--card))); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); font-size: 13.5px; }
+.learn-card { margin-top: 10px; background: var(--card2); border: 1px solid var(--line); border-radius: 14px; padding: 10px 12px; }
+.learn-card.on { border-color: color-mix(in srgb, var(--good) 45%, var(--line)); background: color-mix(in srgb, var(--good) 7%, var(--card2)); }
+.learn-card .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 0 10px; }
+label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
+.lang-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 10px; font-size: 12px; font-weight: 700; color: var(--muted); }
+.lang-row .seg button { padding: 4px 10px; font-size: 12px; }
+.seg.small button { padding: 3px 9px; font-size: 11.5px; }
+.tabs [hidden] { display: none !important; }
+
+.board-wrap { position: relative; }
+.sq.mark { box-shadow: inset 0 0 0 4px rgba(230, 60, 60, .85); }
+.review-card { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); width: min(92%, 520px); z-index: 20;
+  background: var(--card); border: 2px solid color-mix(in srgb, var(--bad) 55%, var(--line)); border-radius: 18px; padding: 14px 16px;
+  box-shadow: var(--shadow-lg); animation: pop .35s cubic-bezier(.3, 1.5, .5, 1); }
+.review-card[hidden] { display: none; }
+.review-card .rv-title { font-weight: 800; font-size: 17px; color: var(--bad); margin-bottom: 6px; }
+.review-card .rv-text { font-size: 15.5px; line-height: 1.45; white-space: pre-wrap; max-height: 30vh; overflow-y: auto; }
+.review-card .rv-text .dots { display: inline-flex; gap: 4px; vertical-align: middle; }
+.review-card .rv-text .dots i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .4; animation: bounce 1.2s infinite; }
+.review-card .rv-better { margin-top: 8px; font-size: 13px; font-weight: 700; color: var(--good); }
+.review-card .rv-better b { margin-right: 8px; }
+.review-card .rv-actions { display: flex; gap: 8px; margin-top: 12px; }
+.review-card .rv-actions button { flex: 1; padding: 11px; font-size: 15px; margin: 0; }
+
+.teach { flex: 1; overflow-y: auto; min-height: 160px; display: flex; flex-direction: column; gap: 10px; padding: 6px 4px; }
+.teach[hidden], .teach-controls[hidden] { display: none; }
+.teach .note { align-self: center; color: var(--muted); font-size: 12px; font-weight: 700; text-align: center; background: var(--bg2); border-radius: 999px; padding: 3px 12px; }
+.teach .msg { display: flex; align-items: flex-end; gap: 8px; max-width: 94%; }
+.teach .msg.black { align-self: flex-end; flex-direction: row-reverse; }
+.teach .msg .av { width: 34px; height: 34px; font-size: 18px; }
+.teach .bubble { background: color-mix(in srgb, var(--good) 10%, var(--card2)); color: var(--text); border-radius: 18px 18px 18px 6px; padding: 9px 13px; font-size: 15.5px; line-height: 1.45; white-space: pre-wrap; border: 1px solid color-mix(in srgb, var(--good) 25%, var(--line)); }
+.teach .msg.black .bubble { background: var(--bubble-b); color: var(--bubble-b-ink); border-radius: 18px 18px 6px 18px; border-color: transparent; }
+.teach .msg.blunder .bubble { border-color: color-mix(in srgb, var(--bad) 55%, var(--line)); background: color-mix(in srgb, var(--bad) 8%, var(--card2)); }
+.teach .msg.has-arrows { cursor: pointer; }
+.teach .msg.cur .bubble { box-shadow: 0 0 0 2px var(--accent); }
+.teach .who { font-size: 11.5px; font-weight: 800; opacity: .75; display: flex; gap: 6px; align-items: center; margin-bottom: 2px; }
+.teach .chip { background: rgba(127, 127, 127, .2); border-radius: 6px; padding: 0 6px; }
+.teach .chip.q-blunder { color: var(--bad); } .teach .chip.q-mistake { color: #f97316; } .teach .chip.q-inaccuracy { color: var(--warn); } .teach .chip.q-best { color: var(--good); }
+.teach .dots { display: flex; gap: 4px; padding: 6px 2px; }
+.teach .dots i { width: 7px; height: 7px; border-radius: 50%; background: currentColor; opacity: .4; animation: bounce 1.2s infinite; }
+.teach .dots i:nth-child(2) { animation-delay: .15s; } .teach .dots i:nth-child(3) { animation-delay: .3s; }
+.teach .empty { margin: auto; text-align: center; color: var(--muted); font-weight: 700; }
+.teach .empty b { display: block; font-size: 40px; margin-bottom: 6px; }
+.teach-controls { display: grid; gap: 6px; padding-top: 8px; border-top: 1px solid var(--line); margin-top: 6px; }
+.teach-controls .row { display: flex; gap: 6px; }
+.teach-controls .row button { flex: 1; font-size: 14px; padding: 8px; }
+.teach-controls form { display: flex; gap: 6px; }
+.pill.learn { margin-left: 6px; }
