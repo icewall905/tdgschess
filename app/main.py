@@ -176,7 +176,7 @@ class PlayerSpec(BaseModel):
     max_tokens: int = 8192
     show_legal: bool = False  # the Stockfish hints below are a clearer shortlist; turn on when hints are off
     hints: bool = True  # position facts in the prompt: material, attacked/hanging pieces, captures, checks
-    engine_hints: bool = True  # legacy field: LLM players always get Stockfish's top 3 (50 ms) + a game overview
+    engine_hints: bool = True  # legacy field: LLM players always get Stockfish's top 3 (depth 3) + a game overview
     vision: bool = False  # also send a PNG of the board (model must accept images)
     chat: bool = True  # post a short kid-friendly chat message with each move
     persona: str = ""  # optional character for the chat messages, e.g. "a friendly pirate"
@@ -264,7 +264,9 @@ class Analyzer:
 ANALYZER = Analyzer()
 
 
-HINT_SECONDS = 0.05  # short on purpose: a 0.5 s search made every LLM play like ~1700+
+# Depth, not time: time limits vary with CPU load, and even 10-50 ms reaches depth 9-12 (~2000+ play).
+# 0.5 s and 50 ms hints both let Gemma E4B win every game up to Stockfish ~1650.
+HINT_DEPTH = 3
 
 
 class Advisor:
@@ -274,13 +276,13 @@ class Advisor:
         self.engine = None
         self.lock = asyncio.Lock()
 
-    async def top_moves(self, board: chess.Board, n: int = 3, seconds: float = HINT_SECONDS) -> list[dict]:
+    async def top_moves(self, board: chess.Board, n: int = 3, depth: int = HINT_DEPTH) -> list[dict]:
         async with self.lock:
             try:
                 if self.engine is None:
                     _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
                     await self.engine.configure({"Threads": 2, "Hash": 128})
-                infos = await self.engine.analyse(board, chess.engine.Limit(time=seconds),
+                infos = await self.engine.analyse(board, chess.engine.Limit(depth=depth),
                                                   multipv=min(n, board.legal_moves.count()))
             except Exception:
                 self.engine = None

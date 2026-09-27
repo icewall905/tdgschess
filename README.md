@@ -19,9 +19,10 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   - **chat** (default on): model adds a `SAY: …` line before `MOVE:` — short, kid-friendly reaction,
     optional character ("a friendly pirate"). Shown in the 💬 Chat tab next to Model log, with
     optional read-aloud (browser speech). Chat text is ignored when parsing the move.
-  - **Stockfish hints** (always on): Stockfish's top 3 moves from a quick 50 ms MultiPV search (eval in words +
-    a 4-ply line) plus a game overview (phase, last 6 moves in words). With 0.5 s hints Gemma E4B won 8/8 up
-    to Stockfish 1580, so the search is kept short to leave the model's own judgement mattering.
+  - **Stockfish hints** (always on): Stockfish's top 3 moves from a shallow depth-3 MultiPV search (eval in
+    words + a 4-ply line) plus a game overview (phase, last 6 moves in words). Time limits were too strong
+    and load-dependent: 0.5 s (depth ~20) and 50 ms (depth ~12) both let Gemma E4B win every game up to
+    Stockfish ~1650; 10 ms still reaches depth ~9.
   Request errors (e.g. 502) back off and retry up to 6× without using an illegal-move retry.
   The first prompt of each move is logged (Model log → show reasoning → "prompt").
 - Extra request JSON per LLM player is merged into the chat request, e.g.
