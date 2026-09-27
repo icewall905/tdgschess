@@ -318,7 +318,7 @@ class Analyzer:
         async with self.lock:
             try:
                 engine = await self.lazy.acquire()
-                info = await engine.analyse(board, chess.engine.Limit(time=0.25))
+                info = await engine.analyse(board, chess.engine.Limit(time=0.5))  # also the 💡 hint arrow
                 self.lazy.release()
             except Exception:
                 await self.lazy.close()

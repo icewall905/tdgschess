@@ -18,7 +18,8 @@ VALUES = {chess.PAWN: 1, chess.KNIGHT: 3, chess.BISHOP: 3, chess.ROOK: 5, chess.
 NAMES = {chess.PAWN: "pawn", chess.KNIGHT: "knight", chess.BISHOP: "bishop", chess.ROOK: "rook",
          chess.QUEEN: "queen", chess.KING: "king"}
 BLUNDER, MISTAKE, INACCURACY = 0.30, 0.18, 0.10  # win-probability loss, same thresholds as the move list marks
-ANALYSE_SECONDS = 0.3
+ANALYSE_SECONDS = 0.3  # grading moves (good / mistake / blunder)
+ADVICE_SECONDS = 0.5  # the advice itself (hints, questions, best moves): same as the eval bar's hint arrow
 
 TEXT = {
     "en": {"undone": "↩️ Move taken back — try again!", "kept": "OK, we keep that move. Let's see what happens!",
@@ -220,7 +221,7 @@ ENGINE = CoachEngine()
 async def analyse(board: chess.Board, color: bool) -> dict:
     """Everything the teacher may say about the position, for the learner playing `color`."""
     kid_to_move = board.turn == color
-    top = await ENGINE.top(board)
+    top = await ENGINE.top(board, 3, ADVICE_SECONDS)
     ev = top[0] if top else {"cp": 0, "mate": None}
     cp, mate = (ev["cp"], ev["mate"]) if kid_to_move else (-(ev["cp"] or 0), -ev["mate"] if ev["mate"] else None)
     threat = None

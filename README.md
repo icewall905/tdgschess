@@ -106,6 +106,9 @@ where nothing notable happened. Danish messages get the Danish piece names. Worn
 message: a good-game in character, the turning point (largest eval swing) and one tip. Hint answers list the
 computer's reply to each suggested move, so questions like "won't you just take my rook?" get a true answer.
 
+Advice depth: the 💡 hint arrow (eval-bar engine) and all advice (Teacher hint/questions, chat help, best moves)
+use a 0.5 s full-strength search (~20 plies); move grading (good/mistake/blunder) uses 0.3 s.
+
 Explaining *why* (`coach.move_reasons`): for the best moves, python-chess works out the concrete consequences —
 what it takes (and whether for free), checks, forks, pins, attacks, rescuing or protecting a piece, developing,
 castling, the centre, open files, promotion — plus what happens next in Stockfish's line ("if they answer X, you
