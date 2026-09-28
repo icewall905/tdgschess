@@ -182,8 +182,9 @@ class CoachEngine:
         self.lazy = None  # main.LazyEngine, created on first use (main imports this module)
         self.lock = asyncio.Lock()
 
-    async def top(self, board: chess.Board, n: int = 3, seconds: float = ANALYSE_SECONDS) -> list[dict]:
+    async def top(self, board: chess.Board, n: int = 3, seconds: Optional[float] = None) -> list[dict]:
         """Best moves for the side to move, scores from that side's point of view."""
+        seconds = seconds or ANALYSE_SECONDS
         if board.is_game_over():
             return []
         async with self.lock:

@@ -67,6 +67,16 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   shows the position before it with arrows (red = played, orange = the answer, green = better); scrolling the story
   moves the board along (the card at the reading line is shown), and ◀ ▶ scroll the story. Recaps are saved
   in `data/recaps/<game>-<lang>.json`.
+- ⚙️ Settings: game-server dials (max game length, Auto-Stockfish handicap, start ratings, pause before LLM talk,
+  LLM hint depth, advice/grading/eval-bar search times, Stockfish idle shutdown, hibernation, parallel recap calls)
+  and the LLM endpoints (add, rename, reorder - the first is the default - test, remove; API key). Saved in
+  `data/settings.json` and applied live; `.env` stays the fallback ("Back to .env"). An optional admin PIN protects
+  saving settings.
+- 👤 My profile (top-right menu): rating graph, stats, recent games, and a PIN lock. A PIN-locked player can only
+  be picked on a device after entering the PIN (the device keeps a token; "Forget this device" locks it again).
+  The server enforces it for starting/joining games and editing/deleting the player. PINs are stored as salted
+  PBKDF2 hashes; repeated wrong PINs are slowed down. Setup's "This device" Human side and Join use the top-right
+  player; a second human on the same device picks from a list.
 - Players (👪): profiles with an emoji and a rating (start 600, stored in `data/profiles.json`). After each
   finished game a profile's rating moves by Elo (K=40 for the first 10 games, then 24) against the opponent's
   strength: another profile's rating, Stockfish's Elo (auto: its average effective Elo that game).

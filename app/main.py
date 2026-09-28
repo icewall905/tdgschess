@@ -1,8 +1,11 @@
 """TDGS Chess: humans, LLMs (OpenAI-compatible endpoints) and UCI engines playing each other."""
 
 import asyncio
+import hashlib
 import json
 import math
+import secrets
+import sys
 import os
 import random
 import re
@@ -262,7 +265,7 @@ class SayReq(BaseModel):
 
 ENGINE_IDLE = float(os.environ.get("ENGINE_IDLE", "300"))
 HIBERNATE_AFTER = float(os.environ.get("HIBERNATE_AFTER", "3600"))
-QUIET_BEFORE_LLM = float(os.environ.get("QUIET_BEFORE_LLM", "2.5"))  # s without a new move before optional LLM talk  # s without any player viewing a live game  # seconds without use before a Stockfish is shut down
+QUIET_BEFORE_LLM = float(os.environ.get("QUIET_BEFORE_LLM", "2.5"))  # s without a new move before optional LLM talk
 
 
 class LazyEngine:
@@ -318,7 +321,7 @@ class Analyzer:
         async with self.lock:
             try:
                 engine = await self.lazy.acquire()
-                info = await engine.analyse(board, chess.engine.Limit(time=0.5))  # also the 💡 hint arrow
+                info = await engine.analyse(board, chess.engine.Limit(time=EVAL_SECONDS))  # also the 💡 hint arrow
                 self.lazy.release()
             except Exception:
                 await self.lazy.close()
@@ -336,6 +339,7 @@ ANALYZER = Analyzer()
 # Depth, not time: time limits vary with CPU load, and even 10-50 ms reaches depth 9-12 (~2000+ play).
 # 0.5 s and 50 ms hints both let Gemma E4B win every game up to Stockfish ~1650.
 HINT_DEPTH = 3
+EVAL_SECONDS = 0.5  # eval bar and the 💡 hint arrow
 
 
 class Advisor:
@@ -345,7 +349,8 @@ class Advisor:
         self.lazy = LazyEngine({"Threads": 2, "Hash": 32})
         self.lock = asyncio.Lock()
 
-    async def top_moves(self, board: chess.Board, n: int = 3, depth: int = HINT_DEPTH) -> list[dict]:
+    async def top_moves(self, board: chess.Board, n: int = 3, depth: Optional[int] = None) -> list[dict]:
+        depth = depth or HINT_DEPTH
         async with self.lock:
             try:
                 engine = await self.lazy.acquire()
@@ -1764,6 +1769,124 @@ async def run_match(games: list[Game]):
 # ---------------------------------------------------------------- api
 
 app = FastAPI(title="TDGS Chess")
+
+# ---------------------------------------------------------------- settings (data/settings.json, applied live)
+
+SETTINGS_FILE = DATA_DIR / "settings.json"
+# key, (module, attribute), type, min, max, label, help
+DIALS = [
+    ("max_plies", ("main", "MAX_PLIES"), int, 50, 2000, "Max game length (plies)",
+     "A game is called a draw after this many half-moves."),
+    ("auto_below", ("main", "AUTO_BELOW"), int, -300, 600, "Auto Stockfish handicap (Elo)",
+     "Auto Stockfish plays this far below the human's rating. Higher = easier."),
+    ("start_rating", ("main", "START_RATING"), int, 100, 3000, "Start rating: new players", ""),
+    ("llm_start_rating", ("main", "LLM_START_RATING"), int, 100, 3000, "Start rating: new LLM models", ""),
+    ("quiet_before_llm", ("main", "QUIET_BEFORE_LLM"), float, 0, 30, "Pause before LLM talk (s)",
+     "Comments and teacher explanations wait this long without a new move; fast play costs no LLM calls."),
+    ("hint_depth", ("main", "HINT_DEPTH"), int, 1, 20, "Stockfish hint depth for LLM players",
+     "How deep the hints given to LLM players look. Higher = the LLM plays more like Stockfish."),
+    ("advice_seconds", ("coach", "ADVICE_SECONDS"), float, 0.05, 5, "Advice search time (s)",
+     "Stockfish time for hints, questions and best moves shown to players."),
+    ("grade_seconds", ("coach", "ANALYSE_SECONDS"), float, 0.05, 3, "Move grading search time (s)",
+     "Stockfish time for grading moves (good / mistake / blunder)."),
+    ("eval_seconds", ("main", "EVAL_SECONDS"), float, 0.05, 5, "Eval bar search time (s)",
+     "Stockfish time for the eval bar and the 💡 hint arrow."),
+    ("engine_idle", ("main", "ENGINE_IDLE"), float, 30, 3600, "Stockfish idle shutdown (s)",
+     "An unused Stockfish process is stopped after this long; the next move restarts it."),
+    ("hibernate_after", ("main", "HIBERNATE_AFTER"), float, 300, 604800, "Hibernate unwatched games after (s)",
+     "Live games with a human that nobody has looked at are saved and stopped (they can be resumed)."),
+    ("recap_parallel", ("recap", "PARALLEL_LLM"), int, 1, 8, "Parallel LLM calls for recaps", ""),
+]
+DIAL_DEFAULTS: dict = {}
+
+
+def dial_module(name: str):
+    return {"main": sys.modules[__name__], "coach": coach, "recap": recap}[name]
+
+
+def load_settings() -> dict:
+    try:
+        return json.loads(SETTINGS_FILE.read_text())
+    except FileNotFoundError:
+        return {}
+
+
+def save_settings(data: dict):
+    tmp = SETTINGS_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, ensure_ascii=False))
+    tmp.replace(SETTINGS_FILE)
+
+
+def apply_settings(data: dict):
+    global API_KEY
+    for key, (mod, attr), typ, lo, hi, *_ in DIALS:
+        DIAL_DEFAULTS.setdefault(key, getattr(dial_module(mod), attr))  # .env / code value = the default
+        value = data.get("dials", {}).get(key, DIAL_DEFAULTS[key])
+        setattr(dial_module(mod), attr, typ(min(hi, max(lo, value))))
+    if data.get("endpoints"):
+        ENDPOINTS.clear()
+        ENDPOINTS.update({e["name"]: e["url"].rstrip("/") for e in data["endpoints"] if e.get("name") and e.get("url")})
+    if data.get("api_key"):
+        API_KEY = data["api_key"]
+
+
+SETTINGS = load_settings()
+ENV_ENDPOINTS = [{"name": n, "url": u} for n, u in ENDPOINTS.items()]
+apply_settings(SETTINGS)
+
+
+def pin_hash(pin: str, salt: Optional[str] = None) -> tuple[str, str]:
+    salt = salt or secrets.token_hex(8)
+    return salt, hashlib.pbkdf2_hmac("sha256", pin.encode(), salt.encode(), 120_000).hex()
+
+
+def pin_ok(pin: str, salt: Optional[str], digest: Optional[str]) -> bool:
+    return bool(salt and digest) and secrets.compare_digest(pin_hash(pin, salt)[1], digest)
+
+
+PIN_FAILS: dict[str, tuple[int, float]] = {}  # what -> (wrong tries, locked until)
+
+
+def pin_guard(what: str):
+    tries, until = PIN_FAILS.get(what, (0, 0))
+    if time.time() < until:
+        raise HTTPException(429, f"too many wrong PINs - try again in {int(until - time.time()) + 1} s")
+
+
+def pin_failed(what: str):
+    tries, _ = PIN_FAILS.get(what, (0, 0))
+    tries += 1
+    PIN_FAILS[what] = (tries, time.time() + (30 * 2 ** (tries - 5) if tries >= 5 else 0))
+
+
+def device_tokens(header: Optional[str]) -> dict:
+    try:
+        return json.loads(header or "{}")
+    except ValueError:
+        return {}
+
+
+def profile_locked(pid: Optional[str]) -> bool:
+    return bool(pid in PROFILES and PROFILES[pid].get("pin_hash"))
+
+
+def profile_unlocked(pid: Optional[str], tokens: dict) -> bool:
+    """True if the profile has no PIN, or this device holds a token issued when the PIN was entered."""
+    if not profile_locked(pid):
+        return True
+    token = tokens.get(pid)
+    return bool(token) and hashlib.sha256(token.encode()).hexdigest() in PROFILES[pid].get("tokens", [])
+
+
+def require_unlocked(pid: Optional[str], header: Optional[str]):
+    if not profile_unlocked(pid, device_tokens(header)):
+        raise HTTPException(403, f"{PROFILES[pid]['name']} is PIN-locked - enter the PIN on this device first")
+
+
+def public_profile(p: dict) -> dict:
+    out = {k: v for k, v in p.items() if k not in ("pin_hash", "pin_salt", "tokens")}
+    out["locked"] = bool(p.get("pin_hash"))
+    return out
 STATIC = Path(__file__).parent / "static"
 
 
@@ -1806,8 +1929,11 @@ def apply_profile(spec: PlayerSpec):
 
 
 @app.post("/api/games")
-async def create(req: NewGame, x_client_id: Optional[str] = Header(None)):
+async def create(req: NewGame, x_client_id: Optional[str] = Header(None),
+                 x_profile_tokens: Optional[str] = Header(None)):
     for spec in (req.white, req.black):
+        if spec.type == "human" and not spec.remote:
+            require_unlocked(spec.profile, x_profile_tokens)
         apply_profile(spec)
         if spec.type == "llm" and spec.endpoint and spec.model:
             spec.rating_key = (await resolve_model_key(spec.endpoint, spec.model) + (" · pure" if spec.pure else "")
@@ -2094,7 +2220,10 @@ async def open_games(x_client_id: Optional[str] = Header(None)):
 
 
 @app.post("/api/join")
-async def join(req: JoinReq, x_client_id: Optional[str] = Header(None)):
+async def join(req: JoinReq, x_client_id: Optional[str] = Header(None),
+               x_profile_tokens: Optional[str] = Header(None)):
+    if req.profile:
+        require_unlocked(req.profile, x_profile_tokens)
     if not x_client_id:
         raise HTTPException(400, "missing client id")
     g = live_match_game(req.code.strip())
@@ -2309,7 +2438,7 @@ async def backfill_llm_ratings():
 
 @app.get("/api/profiles")
 async def list_profiles():
-    return sorted(PROFILES.values(), key=lambda p: p["created"])
+    return [public_profile(p) for p in sorted(PROFILES.values(), key=lambda p: p["created"])]
 
 
 @app.post("/api/profiles")
@@ -2320,13 +2449,14 @@ async def create_profile(p: ProfileIn):
     PROFILES[pid] = new_profile(pid, p.name.strip()[:40], (p.emoji or "🙂").strip()[:8],
                                 p.rating if p.rating else START_RATING)
     save_profiles()
-    return PROFILES[pid]
+    return public_profile(PROFILES[pid])
 
 
 @app.patch("/api/profiles/{pid}")
-async def update_profile(pid: str, p: ProfileIn):
+async def update_profile(pid: str, p: ProfileIn, x_profile_tokens: Optional[str] = Header(None)):
     if pid not in PROFILES:
         raise HTTPException(404)
+    require_unlocked(pid, x_profile_tokens)
     prof = PROFILES[pid]
     if p.name and p.name.strip():
         prof["name"] = p.name.strip()[:40]
@@ -2336,14 +2466,195 @@ async def update_profile(pid: str, p: ProfileIn):
         prof["rating"] = max(100, min(3000, p.rating))
         prof["history"].append({"t": time.time(), "rating": prof["rating"], "manual": True})
     save_profiles()
-    return prof
+    return public_profile(prof)
 
 
 @app.delete("/api/profiles/{pid}")
-async def delete_profile(pid: str):
+async def delete_profile(pid: str, x_profile_tokens: Optional[str] = Header(None)):
+    if pid in PROFILES:
+        require_unlocked(pid, x_profile_tokens)
     PROFILES.pop(pid, None)
     save_profiles()
     return {"ok": True}
+
+
+class PinReq(BaseModel):
+    pin: str = ""  # the PIN to check, or the new PIN ("" removes it)
+    current: Optional[str] = None  # the current PIN, when changing or removing one
+
+
+def valid_pin(pin: str) -> str:
+    pin = pin.strip()
+    if not (pin.isdigit() and 4 <= len(pin) <= 8):
+        raise HTTPException(400, "the PIN must be 4-8 digits")
+    return pin
+
+
+def new_device_token(prof: dict) -> str:
+    token = secrets.token_urlsafe(24)
+    prof.setdefault("tokens", []).append(hashlib.sha256(token.encode()).hexdigest())
+    prof["tokens"] = prof["tokens"][-20:]  # a household has a handful of devices
+    return token
+
+
+@app.post("/api/profiles/{pid}/unlock")
+async def unlock_profile(pid: str, req: PinReq):
+    """Enter the PIN on this device: returns a token the device keeps, so it doesn't ask again."""
+    prof = PROFILES.get(pid)
+    if not prof:
+        raise HTTPException(404)
+    if not prof.get("pin_hash"):
+        return {"token": None}
+    pin_guard(pid)
+    if not pin_ok(req.pin.strip(), prof.get("pin_salt"), prof.get("pin_hash")):
+        pin_failed(pid)
+        raise HTTPException(403, "wrong PIN")
+    PIN_FAILS.pop(pid, None)
+    token = new_device_token(prof)
+    save_profiles()
+    return {"token": token}
+
+
+@app.post("/api/profiles/{pid}/pin")
+async def set_profile_pin(pid: str, req: PinReq):
+    """Set, change or remove (pin = "") a player's PIN. Changing or removing needs the current PIN;
+    every other device has to enter the new PIN again."""
+    prof = PROFILES.get(pid)
+    if not prof:
+        raise HTTPException(404)
+    if prof.get("pin_hash"):
+        pin_guard(pid)
+        if not pin_ok((req.current or "").strip(), prof.get("pin_salt"), prof.get("pin_hash")):
+            pin_failed(pid)
+            raise HTTPException(403, "the current PIN is wrong")
+    prof["tokens"] = []
+    if req.pin.strip():
+        prof["pin_salt"], prof["pin_hash"] = pin_hash(valid_pin(req.pin))
+        token = new_device_token(prof)
+    else:
+        prof.pop("pin_salt", None)
+        prof.pop("pin_hash", None)
+        token = None
+    save_profiles()
+    return {"token": token, "locked": bool(prof.get("pin_hash"))}
+
+
+@app.post("/api/profiles/{pid}/forget")
+async def forget_device(pid: str, x_profile_tokens: Optional[str] = Header(None)):
+    """Lock the profile again on this device."""
+    prof = PROFILES.get(pid)
+    token = device_tokens(x_profile_tokens).get(pid)
+    if prof and token:
+        digest = hashlib.sha256(token.encode()).hexdigest()
+        prof["tokens"] = [t for t in prof.get("tokens", []) if t != digest]
+        save_profiles()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------- settings api
+
+class SettingsReq(BaseModel):
+    dials: Optional[dict] = None
+    endpoints: Optional[list[dict]] = None
+    api_key: Optional[str] = None  # "" = back to .env
+    new_admin_pin: Optional[str] = None  # "" removes it
+
+
+def require_admin(pin: Optional[str]):
+    digest = SETTINGS.get("admin_pin_hash")
+    if not digest:
+        return
+    pin_guard("admin")
+    if not pin_ok((pin or "").strip(), SETTINGS.get("admin_pin_salt"), digest):
+        pin_failed("admin")
+        raise HTTPException(403, "admin PIN needed to change settings")
+    PIN_FAILS.pop("admin", None)
+
+
+def settings_view() -> dict:
+    return {
+        "dials": [{"key": k, "label": label, "help": help_, "type": typ.__name__, "min": lo, "max": hi,
+                   "default": DIAL_DEFAULTS[k], "value": getattr(dial_module(mod), attr)}
+                  for k, (mod, attr), typ, lo, hi, label, help_ in DIALS],
+        "endpoints": [{"name": n, "url": u} for n, u in ENDPOINTS.items()],
+        "endpoints_from": "settings" if SETTINGS.get("endpoints") else ".env",
+        "api_key_set": bool(SETTINGS.get("api_key")),
+        "admin_locked": bool(SETTINGS.get("admin_pin_hash")),
+    }
+
+
+@app.get("/api/settings")
+async def get_settings():
+    return settings_view()
+
+
+@app.put("/api/settings")
+async def put_settings(req: SettingsReq, x_admin_pin: Optional[str] = Header(None)):
+    require_admin(x_admin_pin)
+    if req.dials is not None:
+        known = {k: typ for k, _, typ, *_ in DIALS}
+        SETTINGS["dials"] = {k: known[k](v) for k, v in req.dials.items() if k in known and v is not None}
+    if req.endpoints is not None:
+        eps, seen = [], set()
+        for e in req.endpoints:
+            name, url = (e.get("name") or "").strip(), (e.get("url") or "").strip()
+            if not name or not url or name in seen:
+                continue
+            if not url.startswith("http"):
+                url = "http://" + url
+            eps.append({"name": name, "url": url.rstrip("/")})
+            seen.add(name)
+        if not eps:
+            raise HTTPException(400, "keep at least one endpoint")
+        SETTINGS["endpoints"] = eps
+        MODEL_KEYS.clear()  # re-resolve models on the (possibly new) endpoints
+    if req.api_key is not None:
+        if req.api_key.strip():
+            SETTINGS["api_key"] = req.api_key.strip()
+        else:
+            SETTINGS.pop("api_key", None)
+            globals()["API_KEY"] = os.environ.get("LLM_API_KEY", "none")
+    if req.new_admin_pin is not None:
+        if req.new_admin_pin.strip():
+            SETTINGS["admin_pin_salt"], SETTINGS["admin_pin_hash"] = pin_hash(valid_pin(req.new_admin_pin))
+        else:
+            SETTINGS.pop("admin_pin_salt", None)
+            SETTINGS.pop("admin_pin_hash", None)
+    save_settings(SETTINGS)
+    apply_settings(SETTINGS)
+    return settings_view()
+
+
+@app.post("/api/settings/reset-endpoints")
+async def reset_endpoints(x_admin_pin: Optional[str] = Header(None)):
+    """Back to the endpoints from .env."""
+    require_admin(x_admin_pin)
+    SETTINGS.pop("endpoints", None)
+    save_settings(SETTINGS)
+    ENDPOINTS.clear()
+    ENDPOINTS.update({e["name"]: e["url"] for e in ENV_ENDPOINTS})
+    MODEL_KEYS.clear()
+    return settings_view()
+
+
+class TestReq(BaseModel):
+    url: str
+
+
+@app.post("/api/settings/test-endpoint")
+async def test_endpoint(req: TestReq):
+    url = req.url.strip().rstrip("/")
+    if not url.startswith("http"):
+        url = "http://" + url
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(url + "/models", headers={"Authorization": f"Bearer {API_KEY}"})
+            r.raise_for_status()
+            models = [m["id"] for m in r.json().get("data", [])]
+    except Exception as e:
+        return {"online": False, "error": f"{type(e).__name__}: {str(e)[:120]}"}
+    return {"online": True, "models": models, "ms": round((time.time() - t0) * 1000)}
 
 
 app.mount("/static", StaticFiles(directory=STATIC), name="static")

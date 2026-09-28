@@ -12,7 +12,8 @@ const h = (tag, attrs = {}, ...kids) => {
   return el;
 };
 const api = async (path, opts = {}) => {
-  const r = await fetch(path, { headers: { "Content-Type": "application/json", "X-Client-Id": CID }, ...opts });
+  const r = await fetch(path, { ...opts, headers: { "Content-Type": "application/json", "X-Client-Id": CID,
+    "X-Profile-Tokens": JSON.stringify(store.get("profileTokens", {})), ...(opts.headers || {}) } });
   if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch {} throw new Error(m); }
   return r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
 };
@@ -28,6 +29,43 @@ const CID = (() => {
   return c;
 })();
 let profiles = [];
+
+// ---- PIN prompt + device tokens for PIN-locked players
+function askPin(title) {
+  return new Promise((resolve) => {
+    const modal = $("#pin-modal"), input = $("#pin-input");
+    $("#pin-title").textContent = title;
+    $("#pin-err").textContent = "";
+    input.value = "";
+    modal.hidden = false;
+    setTimeout(() => input.focus(), 50);
+    const done = (v) => { modal.hidden = true; $("#pin-ok").onclick = $("#pin-cancel").onclick = input.onkeydown = null; resolve(v); };
+    $("#pin-ok").onclick = () => done(input.value.trim() || null);
+    $("#pin-cancel").onclick = () => done(null);
+    input.onkeydown = (e) => { if (e.key === "Enter") done(input.value.trim() || null); if (e.key === "Escape") done(null); };
+  });
+}
+const tokenFor = (pid) => store.get("profileTokens", {})[pid];
+function setToken(pid, token) {
+  const t = store.get("profileTokens", {});
+  if (token) t[pid] = token; else delete t[pid];
+  store.set("profileTokens", t);
+}
+// true if the player can be used on this device (no PIN, already unlocked here, or the right PIN now)
+async function ensureUnlocked(pid) {
+  const p = profiles.find((x) => x.id === pid);
+  if (!p || !p.locked || tokenFor(pid)) return true;
+  for (let tries = 0; tries < 3; tries++) {
+    const pin = await askPin(`🔒 ${p.emoji} ${p.name}: PIN`);
+    if (!pin) return false;
+    try {
+      const r = await api(`/api/profiles/${pid}/unlock`, { method: "POST", body: JSON.stringify({ pin }) });
+      setToken(pid, r.token);
+      return true;
+    } catch (e) { alert(e.message); }
+  }
+  return false;
+}
 const profileById = (id) => profiles.find((p) => p.id === id);
 async function loadProfiles() { try { profiles = await api("/api/profiles"); } catch {} renderMe(); }
 
@@ -75,16 +113,14 @@ function renderMe() {
     h("span", { class: "me-name" }, p ? p.name : (lang === "da" ? "Gæst" : "Guest")), h("span", { class: "me-caret" }, "▾"));
 }
 
-function chooseMe(pid) {
+async function chooseMe(pid) {
+  if (pid && !(await ensureUnlocked(pid))) return;
   const old = myProfile;
   rememberProfile(pid);
   me = { ...me, profile: myProfile };
   store.set("me", me);
-  // this device's own Human sides follow the new choice
-  for (const side of ["white", "black"]) {
-    const s = setup[side];
-    if (s?.type === "human" && !s.remote && (s.profile === old || !s.profile)) s.profile = myProfile;
-  }
+  const ms = meSide();  // this device's Human side follows the new choice
+  if (ms) setup[ms].profile = myProfile;
   store.set("setup", setup);
   renderSetup();
   $("#me-menu").hidden = true;
@@ -98,8 +134,9 @@ async function openMeMenu() {
     h("span", { class: "me-av" }, emoji), h("span", { class: "me-item-name" }, name), extra ? h("span", { class: "muted" }, extra) : null);
   menu.replaceChildren(
     h("div", { class: "me-title" }, lang === "da" ? "Hvem spiller her?" : "Who's playing here?"),
-    ...profiles.map((p) => item(p.id, p.emoji, p.name, `⭐ ${p.rating}`)),
+    ...profiles.map((p) => item(p.id, p.emoji, p.name, `${p.locked && !tokenFor(p.id) ? "🔒 " : ""}⭐ ${p.rating}`)),
     item(null, "🙂", lang === "da" ? "Gæst" : "Guest", null),
+    myProfile ? h("button", { type: "button", class: "me-manage", onclick: () => { menu.hidden = true; showView("profile"); } }, lang === "da" ? "👤 Min profil" : "👤 My profile") : null,
     h("button", { type: "button", class: "me-manage", onclick: () => { menu.hidden = true; showView("players"); } }, lang === "da" ? "✏️ Rediger spillere" : "✏️ Manage players"));
   menu.hidden = false;
 }
@@ -153,6 +190,9 @@ function commentaryFields(s, side, box) {
         h("datalist", { id: `cmodels-${side}` }, ...(ep?.models || []).map((m) => h("option", { value: m }))))),
     h("label", {}, "Chat character (optional)", h("input", { value: s.persona || "", placeholder: "e.g. a friendly robot fish", oninput: (e) => { s.persona = e.target.value; store.set("setup", setup); } })));
 }
+
+// the first Human side playing on this device is "me" (the top-right player)
+const meSide = () => ["white", "black"].find((x) => setup[x]?.type === "human" && !setup[x].remote);
 
 function renderSide(side) {
   const box = $(`.side-config[data-side=${side}]`);
@@ -232,12 +272,30 @@ function renderSide(side) {
     );
   } else if (s.type === "human") {
     if (s.profile && !profileById(s.profile)) s.profile = null;
-    const sel = h("select", {
-      onchange: (e) => { s.profile = e.target.value || null; if (!s.remote) rememberProfile(s.profile); store.set("setup", setup); renderSide(side); },
-    }, h("option", { value: "", selected: !s.profile }, "🙂 Guest"),
-      ...profiles.map((p) => h("option", { value: p.id, selected: s.profile === p.id }, `${p.emoji} ${p.name} · ⭐ ${p.rating}`)));
-    box.append(h("label", {}, s.remote ? "Who's playing? (they can pick when joining)" : "Who's playing?", sel));
-    if (!s.profile) box.append(h("label", {}, "Name", h("input", { value: s.name || "", placeholder: "e.g. Emma", maxlength: "40", oninput: upd("name") })));
+    const da = lang === "da";
+    if (s.remote) {
+      s.profile = null;  // the other device says who they are when joining
+      box.append(h("div", { class: "hint" }, da ? "📱 Spilleren vælger selv, hvem de er, når de joiner." : "📱 The player picks who they are when joining."));
+    } else if (side === meSide()) {
+      // this device's player: set with the top-right button
+      s.profile = myProfile;
+      const p = profileById(myProfile);
+      box.append(h("div", { class: "me-card" }, h("span", { class: "me-av" }, p ? p.emoji : "🙂"),
+        h("div", {}, h("b", {}, p ? p.name : (da ? "Gæst" : "Guest")), h("div", { class: "muted small" }, da ? "dig · skift øverst til højre ↗" : "you · change top right ↗"))));
+      if (!p) box.append(h("label", {}, da ? "Navn" : "Name", h("input", { value: s.name || "", placeholder: "e.g. Emma", maxlength: "40", oninput: upd("name") })));
+    } else {
+      // a second person on the same device
+      const sel = h("select", {
+        onchange: async (e) => {
+          const pid = e.target.value || null;
+          if (pid && !(await ensureUnlocked(pid))) { renderSide(side); return; }
+          s.profile = pid; store.set("setup", setup); renderSide(side);
+        },
+      }, h("option", { value: "", selected: !s.profile }, da ? "🙂 Gæst" : "🙂 Guest"),
+        ...profiles.filter((p) => p.id !== myProfile).map((p) => h("option", { value: p.id, selected: s.profile === p.id }, `${p.emoji} ${p.name} · ⭐ ${p.rating}${p.locked ? " 🔒" : ""}`)));
+      box.append(h("label", {}, da ? "Modstander på denne enhed" : "Opponent on this device", sel));
+      if (!s.profile) box.append(h("label", {}, da ? "Navn" : "Name", h("input", { value: s.name || "", placeholder: "e.g. Emma", maxlength: "40", oninput: upd("name") })));
+    }
     const where = (remote, label) => h("button", {
       type: "button", class: !!s.remote === remote ? "active" : "",
       onclick: () => { s.remote = remote; store.set("setup", setup); renderSide(side); },
@@ -319,7 +377,8 @@ async function startGame() {
   $("#setup-err").textContent = "";
   try {
     const body = {
-      white: setup.white, black: setup.black,
+      white: meSide() === "white" ? { ...setup.white, profile: myProfile } : setup.white,
+      black: meSide() === "black" ? { ...setup.black, profile: myProfile } : setup.black,
       games: Number($("#opt-games").value) || 1,
       swap_colors: $("#opt-swap").checked,
       move_delay: Number($("#opt-delay").value) || 0,
@@ -1218,6 +1277,8 @@ function showView(v) {
   if (v === "games") renderGames();
   if (v === "standings") renderStandings();
   if (v === "players") renderProfiles();
+  if (v === "profile") renderProfilePage();
+  if (v === "settings") renderSettings();
 }
 
 // ------------------------------------------------------------ players (profiles)
@@ -1287,17 +1348,151 @@ async function renderProfiles() {
       } }, "🗑")))) : [h("div", { class: "muted" }, "No rated models yet — they get a rating after their first finished game against a rated opponent.")]));
 }
 
+// ------------------------------------------------------------ my profile (PIN lock)
+async function renderProfilePage() {
+  await loadProfiles();
+  const el = $("#profile-page"), da = lang === "da";
+  const p = profileById(myProfile);
+  if (!p) {
+    el.replaceChildren(h("h2", {}, da ? "👤 Min profil" : "👤 My profile"),
+      h("p", { class: "muted" }, da ? "Du spiller som gæst på denne enhed. Vælg hvem du er øverst til højre." : "You're a guest on this device. Pick who you are with the button top right."));
+    return;
+  }
+  let games = [];
+  try { games = (await api("/api/games")).filter((g) => g.status === "finished" && [g.white, g.black].some((x) => x.profile === p.id)); } catch {}
+  const result = (g) => {
+    const side = g.white.profile === p.id ? "white" : "black";
+    return g.result === "1/2-1/2" ? "½" : (g.result === "1-0") === (side === "white") ? "✅" : "❌";
+  };
+  const pinMsg = h("div", { class: "muted small" });
+  const pinNew = h("input", { type: "password", inputmode: "numeric", maxlength: "8", placeholder: da ? "Ny PIN (4-8 cifre)" : "New PIN (4-8 digits)" });
+  const pinCur = h("input", { type: "password", inputmode: "numeric", maxlength: "8", placeholder: da ? "Nuværende PIN" : "Current PIN" });
+  const setPin = async (remove) => {
+    try {
+      const r = await api(`/api/profiles/${p.id}/pin`, { method: "POST", body: JSON.stringify({ pin: remove ? "" : pinNew.value.trim(), current: pinCur.value.trim() || null }) });
+      setToken(p.id, r.token);
+      renderProfilePage();
+    } catch (e) { pinMsg.textContent = e.message; }
+  };
+  el.replaceChildren(
+    h("div", { class: "pf-head" }, h("span", { class: "big-emoji" }, p.emoji),
+      h("div", {}, h("h2", {}, p.name), h("div", { class: "muted" }, `⭐ ${p.rating} · ${p.games} ${da ? "partier" : "games"} · ${p.w}W ${p.d}D ${p.l}L`)),
+      h("button", { type: "button", onclick: () => chooseMe(null) }, da ? "Skift til gæst" : "Switch to guest")),
+    sparkline(p.history || []),
+    h("h3", {}, da ? "🔒 PIN-lås" : "🔒 PIN lock"),
+    h("p", { class: "muted" }, p.locked
+      ? (da ? "Din profil er låst: på en ny enhed skal PIN'en indtastes, før nogen kan spille som dig. Denne enhed er låst op." : "Your profile is locked: on a new device the PIN has to be entered before anyone can play as you. This device is unlocked.")
+      : (da ? "Sæt en PIN, så kun du kan spille som dig (og ændre din profil og rating)." : "Set a PIN so only you can play as you (and change your profile and rating).")),
+    h("div", { class: "pf-pin" }, ...(p.locked ? [pinCur] : []), pinNew,
+      h("button", { class: "primary", type: "button", onclick: () => setPin(false) }, p.locked ? (da ? "Skift PIN" : "Change PIN") : (da ? "Sæt PIN" : "Set PIN")),
+      p.locked ? h("button", { type: "button", onclick: () => setPin(true) }, da ? "Fjern PIN" : "Remove PIN") : null),
+    pinMsg,
+    p.locked ? h("button", { type: "button", class: "danger", onclick: async () => {
+      await api(`/api/profiles/${p.id}/forget`, { method: "POST" }).catch(() => {});
+      setToken(p.id, null); chooseMe(null); showView("play");
+    } }, da ? "🚪 Glem denne enhed (lås igen)" : "🚪 Forget this device (lock again)") : null,
+    h("h3", {}, da ? "Seneste partier" : "Recent games"),
+    games.length ? h("div", { class: "pf-games" }, ...games.slice(0, 10).map((g) => h("button", { type: "button", class: "pf-game", onclick: () => openGame(g.id) },
+      h("span", {}, result(g)), h("span", {}, `${g.white.label} – ${g.black.label}`), h("span", { class: "muted" }, `${g.result} · ${fmtTime(g.created)}`))))
+      : h("p", { class: "muted" }, da ? "Ingen færdige partier endnu." : "No finished games yet."));
+}
+
+// ------------------------------------------------------------ settings
+let adminPin = sessionStorage.getItem("adminPin") || "";
+async function renderSettings() {
+  const el = $("#settings-page");
+  let st;
+  try { st = await api("/api/settings"); } catch (e) { el.textContent = e.message; return; }
+  const save = async (body, msgEl) => {
+    try {
+      await api("/api/settings", { method: "PUT", body: JSON.stringify(body), headers: { "X-Admin-Pin": adminPin } });
+      msgEl.textContent = "✓ saved"; setTimeout(() => (msgEl.textContent = ""), 2500);
+      try { config = await api("/api/config"); renderSetup(); } catch {}
+      return true;
+    } catch (e) {
+      if (String(e.message).includes("admin PIN")) {
+        const pin = await askPin("🔒 Admin PIN");
+        if (pin) { adminPin = pin; sessionStorage.setItem("adminPin", pin); return save(body, msgEl); }
+      }
+      msgEl.textContent = e.message; return false;
+    }
+  };
+  // dials
+  const dialMsg = h("span", { class: "muted" });
+  const inputs = {};
+  const dials = h("div", { class: "st-dials" }, ...st.dials.map((d) => {
+    const inp = h("input", { type: "number", step: d.type === "int" ? "1" : "0.05", min: d.min, max: d.max, value: d.value });
+    inputs[d.key] = inp;
+    return h("label", { class: "st-dial" }, h("span", { class: "st-label" }, d.label,
+      d.value !== d.default ? h("button", { type: "button", class: "st-reset", title: `default: ${d.default}`, onclick: () => (inp.value = d.default) }, `↺ ${d.default}`) : null),
+      inp, d.help ? h("span", { class: "muted small" }, d.help) : null);
+  }));
+  // endpoints
+  const epMsg = h("span", { class: "muted" });
+  let eps = st.endpoints.map((e) => ({ ...e }));
+  const epBox = h("div", { class: "st-eps" });
+  const drawEps = () => epBox.replaceChildren(...eps.map((e, i) => {
+    const status = h("span", { class: "muted small st-status" });
+    return h("div", { class: "st-ep" },
+      h("input", { value: e.name, placeholder: "name", oninput: (ev) => (e.name = ev.target.value) }),
+      h("input", { value: e.url, placeholder: "http://host:port/v1", oninput: (ev) => (e.url = ev.target.value) }),
+      h("button", { type: "button", title: "Test", onclick: async () => {
+        status.textContent = "…";
+        const r = await api("/api/settings/test-endpoint", { method: "POST", body: JSON.stringify({ url: e.url }) });
+        status.textContent = r.online ? `🟢 ${r.ms} ms · ${r.models.join(", ")}` : `🔴 ${r.error}`;
+      } }, "Test"),
+      h("button", { type: "button", title: "Move up", disabled: i === 0, onclick: () => { eps.splice(i - 1, 0, eps.splice(i, 1)[0]); drawEps(); } }, "↑"),
+      h("button", { type: "button", class: "danger", title: "Remove", onclick: () => { eps.splice(i, 1); drawEps(); } }, "✕"),
+      status);
+  }), h("button", { type: "button", onclick: () => { eps.push({ name: "", url: "" }); drawEps(); } }, "＋ Add endpoint"));
+  drawEps();
+  const key = h("input", { type: "password", placeholder: st.api_key_set ? "•••••• (set - type to replace)" : "API key (empty = from .env)", autocomplete: "off" });
+  // admin PIN
+  const adminMsg = h("span", { class: "muted" });
+  const newAdmin = h("input", { type: "password", inputmode: "numeric", maxlength: "8", placeholder: "4-8 digits" });
+  el.replaceChildren(
+    h("h2", {}, "⚙️ Settings"),
+    st.admin_locked ? h("p", { class: "muted" }, "🔒 Settings are protected by an admin PIN (asked when you save).") : null,
+    h("h3", {}, "Game server"),
+    dials,
+    h("div", { class: "row" }, h("button", { class: "primary", type: "button", onclick: () => {
+      const v = {}; for (const [k, inp] of Object.entries(inputs)) if (inp.value !== "") v[k] = Number(inp.value);
+      save({ dials: v }, dialMsg).then((ok) => ok && renderSettings());
+    } }, "Save dials"), dialMsg),
+    h("h3", {}, "LLM endpoints"),
+    h("p", { class: "muted small" }, `OpenAI-compatible /v1 URLs. The first one is the default for new LLM players, the teacher, comments and recaps. Currently from ${st.endpoints_from}.`),
+    epBox,
+    h("label", {}, "API key", key),
+    h("div", { class: "row" },
+      h("button", { class: "primary", type: "button", onclick: () => {
+        const body = { endpoints: eps };
+        if (key.value.trim()) body.api_key = key.value.trim();
+        save(body, epMsg).then((ok) => ok && renderSettings());
+      } }, "Save endpoints"),
+      st.endpoints_from === "settings" ? h("button", { type: "button", onclick: async () => {
+        try { await api("/api/settings/reset-endpoints", { method: "POST", headers: { "X-Admin-Pin": adminPin } }); renderSettings(); } catch (e) { epMsg.textContent = e.message; }
+      } }, "Back to .env") : null,
+      st.api_key_set ? h("button", { type: "button", onclick: () => save({ api_key: "" }, epMsg).then(() => renderSettings()) }, "Clear API key") : null,
+      epMsg),
+    h("h3", {}, "🔒 Admin PIN"),
+    h("p", { class: "muted small" }, "Optional. When set, changing settings needs this PIN - so the kids can't turn the dials."),
+    h("div", { class: "row" }, newAdmin,
+      h("button", { type: "button", onclick: () => save({ new_admin_pin: newAdmin.value.trim() }, adminMsg).then((ok) => { if (ok) { adminPin = newAdmin.value.trim(); sessionStorage.setItem("adminPin", adminPin); renderSettings(); } }) }, st.admin_locked ? "Change PIN" : "Set PIN"),
+      st.admin_locked ? h("button", { type: "button", onclick: () => save({ new_admin_pin: "" }, adminMsg).then((ok) => ok && renderSettings()) }, "Remove PIN") : null,
+      adminMsg));
+}
+
 // ------------------------------------------------------------ join (network play)
 let joinTimer = null;
 let me = store.get("me", { profile: store.get("myProfile", null), name: "" });
 
 function renderJoinWho() {
-  const pick = (profile) => { me = { ...me, profile }; store.set("me", me); rememberProfile(profile); renderJoinWho(); };
-  $("#join-who").replaceChildren(
-    ...profiles.map((p) => h("button", { type: "button", class: me.profile === p.id ? "active" : "", onclick: () => pick(p.id) },
-      h("b", {}, p.emoji), p.name)),
-    h("button", { type: "button", class: !me.profile ? "active" : "", onclick: () => pick(null) }, h("b", {}, "🙂"), "Guest"),
-    ...(!me.profile ? [h("input", { class: "guest", placeholder: "Your name", value: me.name || "", maxlength: "40",
+  me = { ...me, profile: myProfile };
+  const p = profileById(myProfile), da = lang === "da";
+  $("#join-who").replaceChildren(h("div", { class: "me-card" }, h("span", { class: "me-av" }, p ? p.emoji : "🙂"),
+    h("div", {}, h("b", {}, `${da ? "Joiner som" : "Joining as"} ${p ? p.name : (da ? "gæst" : "guest")}`),
+      h("div", { class: "muted small" }, da ? "skift øverst til højre ↗" : "change top right ↗"))),
+    ...(!p ? [h("input", { class: "guest", placeholder: da ? "Dit navn" : "Your name", value: me.name || "", maxlength: "40",
       oninput: (e) => { me.name = e.target.value; store.set("me", me); } })] : []));
 }
 

@@ -19,6 +19,7 @@
     <button data-view="games">📜 Games</button>
     <button data-view="players">👪 Players</button>
     <button data-view="standings">🏆 Standings</button>
+    <button data-view="settings" title="Settings">⚙️</button>
   </nav>
   <button class="join-btn" id="join-open" title="Join a game on this device">🔑 Join</button>
   <div class="me-wrap">
@@ -139,6 +140,16 @@
     </div>
   </section>
 
+  <!-- PROFILE VIEW -->
+  <section id="view-profile" class="view">
+    <div class="card wide" id="profile-page"></div>
+  </section>
+
+  <!-- SETTINGS VIEW -->
+  <section id="view-settings" class="view">
+    <div class="card wide" id="settings-page"></div>
+  </section>
+
   <!-- STANDINGS VIEW -->
   <section id="view-standings" class="view">
     <div class="card wide">
@@ -152,9 +163,8 @@
 <div class="modal" id="join-modal" hidden>
   <div class="join-box">
     <div class="card-head"><h2>🔑 Join a game</h2><button class="icon-btn small" id="join-close" title="Close">✕</button></div>
-    <div class="join-step">1. Who are you?</div>
-    <div class="who-grid" id="join-who"></div>
-    <div class="join-step">2. Pick a game</div>
+    <div id="join-who"></div>
+    <div class="join-step">Pick a game</div>
     <div class="open-list" id="join-list"></div>
     <div class="join-code">
       <span>or type the code</span>
@@ -162,6 +172,14 @@
       <button class="primary" id="join-go">Join</button>
     </div>
     <div class="err" id="join-err"></div>
+  </div>
+</div>
+<div class="modal" id="pin-modal" hidden>
+  <div class="pin-box">
+    <div class="pin-title" id="pin-title">🔒 Enter PIN</div>
+    <input id="pin-input" type="password" inputmode="numeric" pattern="[0-9]*" maxlength="8" autocomplete="off" placeholder="••••">
+    <div class="err" id="pin-err"></div>
+    <div class="row"><button type="button" id="pin-cancel">Cancel</button><button type="button" class="primary" id="pin-ok">OK</button></div>
   </div>
 </div>
 <div class="modal" id="promo" hidden><div class="promo-box" id="promo-box"></div></div>
