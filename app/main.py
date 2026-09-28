@@ -1579,6 +1579,23 @@ class Game:
         for side, spec in chat_responders(self):
             coach.background(closing_chat(self, side, spec))
 
+    def snapshot(self, status: str = "hibernated", reason: str = "hibernated: the server restarted") -> dict:
+        """The game as a resumable file (seats included), for hibernation and for crash safety."""
+        d = self.state(full=True)
+        d.update(status=status, termination=reason, thinking_for=None, review=None, human_turn=False, legal=[],
+                 resume={"host": self.host,
+                         "seats": {side: sp._seat for side, sp in (("white", self.white), ("black", self.black))}})
+        return d
+
+    def save_progress(self):
+        """After every move: write a resumable copy, so even a crash or a force-kill loses nothing."""
+        try:
+            tmp = GAMES_DIR / f"{self.id}.tmp"
+            tmp.write_text(json.dumps(self.snapshot()))
+            tmp.replace(GAMES_DIR / f"{self.id}.json")
+        except Exception as e:
+            print(f"could not save game {self.id}: {e!r}", file=sys.stderr, flush=True)
+
     def save(self):
         (GAMES_DIR / f"{self.id}.json").write_text(json.dumps(self.state(full=True)))
 
@@ -1624,6 +1641,7 @@ class Game:
                 self.last_move_at = time.time()
                 self.thinking_since = None
                 self.touch()
+                self.save_progress()
                 recap.on_move(self)
                 if self.opts.learning:
                     self.queue_explanation(before, mv, rev if isinstance(rev, dict) else None)
@@ -1736,6 +1754,8 @@ ARCHIVE: dict[str, dict] = {}  # finished games from disk (summary + full)
 for f in sorted(GAMES_DIR.glob("*.json")):
     try:
         d = json.loads(f.read_text())
+        if d.get("status") in ("running", "queued"):
+            d.update(status="hibernated", termination="hibernated: the server restarted")
         ARCHIVE[d["id"]] = d
     except Exception:
         pass
@@ -2070,9 +2090,7 @@ def public(d: dict) -> dict:
 def hibernate(g: Game, reason: str):
     """Park a live game on disk (it can be resumed later) and stop its task and engines."""
     g.hibernating = True
-    d = g.state(full=True)
-    d.update(status="hibernated", termination=reason, thinking_for=None, review=None, human_turn=False, legal=[],
-             resume={"host": g.host, "seats": {side: sp._seat for side, sp in (("white", g.white), ("black", g.black))}})
+    d = g.snapshot("hibernated", reason)
     (GAMES_DIR / f"{g.id}.json").write_text(json.dumps(d))
     ARCHIVE[g.id] = d
     GAMES.pop(g.id, None)
