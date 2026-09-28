@@ -46,6 +46,7 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
 - Language: English by default; pick 🇩🇰 Dansk per game for LLM chat lines, engine comments, chat replies and the
   teacher. The 🇬🇧/🇩🇰 switch next to the game's tabs changes it mid-game (players and the host device only).
 - Each device remembers the player it last picked (profile) and uses it for presets, new Human sides and Join.
+  The top-right button shows who is playing on this device (emoji + name) and switches it (or Guest).
 - LLM chat replies: when a player writes in the chat, the LLM players with chat on (and engines with an LLM
   commentator) answer within a few seconds in a separate background call — the game never waits. A burst of
   messages gets one reply; messages arriving while it types are answered once more afterwards. Replies stay on

@@ -477,3 +477,25 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .recap .rc-counts > div { display: flex; align-items: center; gap: 6px; }
 .recap .rc-counts .av { width: 22px; height: 22px; border-width: 1px; }
 .recap .rc-hint { text-align: center; }
+
+/* ------------------------------------------------------------ who am I */
+.me-wrap { position: relative; }
+.me-btn { display: inline-flex; align-items: center; gap: 8px; border-radius: 999px; padding: 4px 12px 4px 4px; background: var(--card); box-shadow: var(--shadow); font-size: 14px; }
+.me-btn .me-av, .me-item .me-av { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: var(--bg2); font-size: 18px; line-height: 1; }
+.me-btn .me-caret { color: var(--muted); font-size: 11px; }
+.me-menu { position: absolute; right: 0; top: calc(100% + 8px); z-index: 60; min-width: 230px; background: var(--card); border: 1px solid var(--line); border-radius: 16px; box-shadow: var(--shadow-lg); padding: 8px; display: grid; gap: 2px; animation: fade .15s ease; }
+.me-menu[hidden] { display: none; }
+.me-title { font-size: 12px; font-weight: 800; color: var(--muted); padding: 4px 8px 6px; }
+.me-item { display: flex; align-items: center; gap: 10px; border: none; background: none; border-radius: 10px; padding: 6px 8px; text-align: left; }
+.me-item:hover { background: var(--bg2); }
+.me-item.active { background: color-mix(in srgb, var(--accent) 12%, var(--card)); }
+.me-item.active .me-item-name::after { content: " ✓"; color: var(--accent); }
+.me-item-name { flex: 1; font-weight: 700; }
+.me-manage { margin-top: 4px; border-radius: 10px; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 640px) { .me-btn .me-name, .me-btn .me-caret { display: none; } .me-btn { padding: 3px; } }
+@media (max-width: 640px) {
+  header { flex-wrap: wrap; row-gap: 8px; }
+  header nav { order: 3; width: 100%; margin: 0; display: flex; justify-content: space-between; }
+  header nav button { flex: 1; }
+  .brand { margin-right: auto; }
+}

@@ -29,7 +29,7 @@ const CID = (() => {
 })();
 let profiles = [];
 const profileById = (id) => profiles.find((p) => p.id === id);
-async function loadProfiles() { try { profiles = await api("/api/profiles"); } catch {} }
+async function loadProfiles() { try { profiles = await api("/api/profiles"); } catch {} renderMe(); }
 
 const FILES = "abcdefgh";
 const VALUES = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
@@ -62,7 +62,47 @@ let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAU
 let learnCfg = store.get("learn", { on: false, endpoint: null, model: null });
 // the player this device last picked (profile id), used as the default for every Human side and the Join screen
 let myProfile = store.get("myProfile", null);
-const rememberProfile = (pid) => { myProfile = pid || null; store.set("myProfile", myProfile); };
+const rememberProfile = (pid) => { myProfile = pid || null; store.set("myProfile", myProfile); renderMe(); };
+
+// top-right "who am I" button: shows this device's player and picks it
+function renderMe() {
+  const btn = $("#me-btn");
+  if (!btn) return;
+  // before the players list has loaded, show the card remembered from last time
+  const p = profileById(myProfile) || (myProfile && !profiles.length ? store.get("myCard", null) : null);
+  if (p && profileById(myProfile)) store.set("myCard", { emoji: p.emoji, name: p.name });
+  btn.replaceChildren(h("span", { class: "me-av" }, p ? p.emoji : "🙂"),
+    h("span", { class: "me-name" }, p ? p.name : (lang === "da" ? "Gæst" : "Guest")), h("span", { class: "me-caret" }, "▾"));
+}
+
+function chooseMe(pid) {
+  const old = myProfile;
+  rememberProfile(pid);
+  me = { ...me, profile: myProfile };
+  store.set("me", me);
+  // this device's own Human sides follow the new choice
+  for (const side of ["white", "black"]) {
+    const s = setup[side];
+    if (s?.type === "human" && !s.remote && (s.profile === old || !s.profile)) s.profile = myProfile;
+  }
+  store.set("setup", setup);
+  renderSetup();
+  $("#me-menu").hidden = true;
+}
+
+async function openMeMenu() {
+  const menu = $("#me-menu");
+  if (!menu.hidden) { menu.hidden = true; return; }
+  await loadProfiles();
+  const item = (pid, emoji, name, extra) => h("button", { type: "button", class: `me-item${(pid || null) === myProfile ? " active" : ""}`, onclick: () => chooseMe(pid) },
+    h("span", { class: "me-av" }, emoji), h("span", { class: "me-item-name" }, name), extra ? h("span", { class: "muted" }, extra) : null);
+  menu.replaceChildren(
+    h("div", { class: "me-title" }, lang === "da" ? "Hvem spiller her?" : "Who's playing here?"),
+    ...profiles.map((p) => item(p.id, p.emoji, p.name, `⭐ ${p.rating}`)),
+    item(null, "🙂", lang === "da" ? "Gæst" : "Guest", null),
+    h("button", { type: "button", class: "me-manage", onclick: () => { menu.hidden = true; showView("players"); } }, lang === "da" ? "✏️ Rediger spillere" : "✏️ Manage players"));
+  menu.hidden = false;
+}
 const meHuman = () => ({ ...DEFAULTS.human, profile: myProfile });
 let lang = "en";  // chat lines, engine comments and the teacher; English unless Danish is picked for this game
 const T = {
@@ -1310,6 +1350,8 @@ async function refreshLive() {
 
 // ------------------------------------------------------------ wiring
 $("#join-open").onclick = () => openJoin();
+$("#me-btn").onclick = (e) => { e.stopPropagation(); openMeMenu(); };
+document.addEventListener("click", (e) => { if (!e.target.closest(".me-wrap")) $("#me-menu").hidden = true; });
 $("#join-close").onclick = closeJoin;
 $("#join-modal").addEventListener("click", (e) => { if (e.target.id === "join-modal") closeJoin(); });
 $("#join-go").onclick = () => doJoin($("#join-code").value.trim());
@@ -1396,6 +1438,8 @@ document.addEventListener("keydown", (e) => {
 });
 
 (async function init() {
+  renderMe();  // right away (from the remembered card), then again once the players are loaded
+  const profilesLoaded = loadProfiles();  // quick; the endpoint check below can take a few seconds
   $("#show-best").checked = store.get("showBest", false);
   $("#sound").checked = store.get("sound", true);
   $("#show-reasoning").checked = store.get("showReasoning", false);
@@ -1405,7 +1449,9 @@ document.addEventListener("keydown", (e) => {
   if (store.get("setupCollapsed", false)) collapseSetup(true);
   setTab(store.get("infoTab", "chat"));
   try { config = await api("/api/config"); } catch {}
-  await loadProfiles();
+  await profilesLoaded;
+  if (myProfile && !profileById(myProfile)) rememberProfile(null);  // that player was deleted
+  renderMe();
   // fill in endpoint/model for stored LLM setups that have none
   for (const [i, side] of ["white", "black"].entries()) {
     if (setup[side].type === "llm" && !setup[side].model) Object.assign(setup[side], firstModel(i));
