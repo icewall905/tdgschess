@@ -208,7 +208,7 @@ class PlayerSpec(BaseModel):
     elo: int = 0  # stockfish: 0 = full strength, else 300..3190 (below 1320 via the calibrated weak sampler)
     auto: bool = False  # stockfish: play a bit below the opponent's rating, easing off when far ahead
     rating_key: Optional[str] = None  # llm: set at game creation to the real model behind the id
-    commentary: bool = False  # engines: an LLM writes a chat message for each move (uses persona/extra)
+    commentary: bool = True  # engines: an LLM writes a chat message for each move (uses persona/extra)
     comment_endpoint: Optional[str] = None
     comment_model: Optional[str] = None
     movetime: float = 0.5  # seconds per move
@@ -1084,10 +1084,28 @@ def chat_responders(game) -> list[tuple[str, PlayerSpec]]:
     """LLMs that talk in this game: LLM players with chat on, and engines with an LLM commentator."""
     out = []
     for side, sp in (("white", game.white), ("black", game.black)):
-        if (sp.type == "llm" and sp.chat and sp.endpoint and sp.model) or \
-                (sp.type == "stockfish" and sp.commentary and sp.comment_endpoint and sp.comment_model):
+        if (sp.type == "llm" and sp.chat and sp.endpoint and sp.model) or (sp.type == "stockfish" and sp.commentary):
             out.append((side, sp))
+    if not out:  # nobody talks in this game: the engine answers the players anyway, with the default LLM
+        out = [(side, sp) for side, sp in (("white", game.white), ("black", game.black)) if sp.type == "stockfish"][:1]
     return out
+
+
+def default_llm() -> tuple[str, str]:
+    """The first configured endpoint and its first model (the no-think endpoint is listed first)."""
+    for ep in ENDPOINTS:
+        mids = [mid for (e, mid) in MODEL_KEYS if e == ep]
+        if mids:
+            return ep, mids[0]
+    return next(iter(ENDPOINTS), ""), "currentmodel"
+
+
+def talker(spec: PlayerSpec) -> tuple[str, str]:
+    if spec.type == "llm":
+        return spec.endpoint, spec.model
+    if spec.comment_endpoint and spec.comment_model:
+        return spec.comment_endpoint, spec.comment_model
+    return default_llm()
 
 
 async def chat_reply(game, side: str, spec: PlayerSpec):
@@ -1101,7 +1119,7 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     convo = [e for e in game.log if e.get("kind") == "chat"][-8:]
     history = "\n".join(f"{'You' if e.get('bot') and e['side'] == side else game.spec_for(e['side'] == 'white').label()}: {e['say']}"
                         for e in convo)
-    endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
+    endpoint, model = talker(spec)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     persona = spec.persona.strip() or "a cheerful chess buddy"
     helping, arrows = "", []
@@ -1190,7 +1208,7 @@ async def closing_chat(game, side: str, spec: PlayerSpec):
     r = (game.ratings or {}).get(other)
     if r and r.get("delta") is not None:
         facts.append(f"The other player's rating went {r['before']} -> {r['after']}")
-    endpoint, model = (spec.endpoint, spec.model) if spec.type == "llm" else (spec.comment_endpoint, spec.comment_model)
+    endpoint, model = talker(spec)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     body = {"model": model, "temperature": 0.8, "max_tokens": 300, "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": CLOSING_PROMPT.format(
@@ -1261,9 +1279,10 @@ def move_words(board: chess.Board, mv: chess.Move) -> str:
 
 def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Board, mv: chess.Move):
     """Ask an LLM for a chat line about the engine's move, without delaying the game."""
-    if not (spec.commentary and spec.comment_model):
+    if not spec.commentary:
         return
-    base = ENDPOINTS.get(spec.comment_endpoint or "", spec.comment_endpoint or "")
+    endpoint, comment_model = talker(spec)  # the default LLM when none was picked
+    base = ENDPOINTS.get(endpoint or "", endpoint or "")
     if not base:
         return
     side = "white" if color else "black"
@@ -1285,7 +1304,7 @@ def engine_comment(game: "Game", spec: PlayerSpec, color: bool, board: chess.Boa
     opp = game.spec_for(not color).label()
     persona = spec.persona.strip() or "a cheerful chess buddy"
     body = {
-        "model": spec.comment_model,
+        "model": comment_model,
         "messages": [
             {"role": "system", "content": COMMENT_PROMPT.format(persona=persona, engine=spec.label(), lang=chat_lang_line(game),
                                                                 color="White" if color else "Black", opp=opp)},

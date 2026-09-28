@@ -94,7 +94,7 @@ let skipAnim = false;     // human dropped the piece by drag, it is already on t
 const DEFAULTS = {
   human: { type: "human", profile: null, remote: false },
   llm: { type: "llm", endpoint: "", model: "", temperature: 0.6, max_tokens: 8192, retries: 3, show_legal: false, hints: true, engine_hints: true, vision: false, chat: true, persona: "", on_fail: "random", extra: {} },
-  stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: false, persona: "" },
+  stockfish: { type: "stockfish", auto: true, elo: 1500, movetime: 0.5, commentary: true, persona: "" },
 };
 let setup = store.get("setup", { white: { ...DEFAULTS.human }, black: { ...DEFAULTS.llm } });
 let learnCfg = store.get("learn", { on: false, endpoint: null, model: null });
@@ -153,6 +153,10 @@ const T = {
         waitKid: "Venter på at spilleren bestemmer sig…", empty: "Læreren forklarer hvert træk her. Spørg om alt!" },
 };
 const tr = (k) => (T[game?.lang || lang] || T.en)[k];
+if (!store.get("commentaryOn", false)) {  // LLM comments became the default for Stockfish (once, for saved setups)
+  for (const side of ["white", "black"]) if (setup[side]?.type === "stockfish") setup[side].commentary = true;
+  store.set("commentaryOn", true);
+}
 for (const side of ["white", "black"]) {
   if (!DEFAULTS[setup[side]?.type]) setup[side] = { ...DEFAULTS.stockfish };  // Lc0 was removed
   if (setup[side].type === "llm" && setup[side].engine_hints === undefined) Object.assign(setup[side], { engine_hints: true, show_legal: false });  // hints became the default
@@ -1647,6 +1651,13 @@ document.addEventListener("keydown", (e) => {
   await profilesLoaded;
   if (myProfile && !profileById(myProfile)) rememberProfile(null);  // that player was deleted
   renderMe();
+  for (const side of ["white", "black"]) {  // commentary on but no LLM picked yet: use the default endpoint
+    const s = setup[side];
+    if (s?.type === "stockfish" && s.commentary && !s.comment_model) {
+      const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
+      if (ep) { s.comment_endpoint = ep.name; s.comment_model = ep.models?.[0] || ""; }
+    }
+  }
   // fill in endpoint/model for stored LLM setups that have none
   for (const [i, side] of ["white", "black"].entries()) {
     if (setup[side].type === "llm" && !setup[side].model) Object.assign(setup[side], firstModel(i));

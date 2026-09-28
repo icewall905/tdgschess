@@ -27,7 +27,7 @@ Web UI at `http://<your-host>:8765` (e.g. `http://localhost:8765`) — human / L
   The first prompt of each move is logged (Model log → show reasoning → "prompt").
 - Extra request JSON per LLM player is merged into the chat request, e.g.
   `{"chat_template_kwargs": {"enable_thinking": false}}` to turn off reasoning on llama.cpp/Qwen.
-- Engine chat: Stockfish can have "Chat comments by an LLM" — after each engine move an LLM (endpoint +
+- Engine chat (on by default; uses the first endpoint unless one is picked): Stockfish has "Chat comments by an LLM" — after each engine move an LLM (endpoint +
   model + optional character) writes a kid-friendly chat line from move facts, material and the eval bar's
   score. It runs in the background, so the engine never waits for it; the comment appears when it arrives.
 - 🎓 Learning mode (preset "Learn with a teacher", or the Learning mode box): the kid plays auto Stockfish and
