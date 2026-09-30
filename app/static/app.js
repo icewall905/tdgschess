@@ -412,9 +412,9 @@ function parseFen(fen) {
   return map;
 }
 
-const shownPly = () => (viewPly == null ? game.san.length : viewPly);
+const shownPly = () => battleView ?? (viewPly == null ? game.san.length : viewPly);
 const isLive = () => viewPly == null || viewPly === game?.san.length;
-const canMove = () => game && game.human_turn && isLive();
+const canMove = () => game && game.human_turn && isLive() && battleView == null;
 
 function renderBoard() {
   const board = $("#board");
@@ -422,9 +422,10 @@ function renderBoard() {
   const fen = game ? game.fens[shownPly()] : "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
   const pos = parseFen(fen);
   const ply = game ? shownPly() : 0;
+  const hidden = Battle.sync(game ? `${game.id}:${ply}` : "");
   const last = game && ply > 0 ? game.uci[ply - 1] : null;
   const toMove = fen.split(" ")[1];
-  const inCheck = game && ply === game.san.length ? game.check : false;
+  const inCheck = game && ply === game.san.length && battleView == null ? game.check : false;
   const targets = selected && canMove() ? game.legal.filter((u) => u.startsWith(selected)).map((u) => u.slice(2, 4)) : [];
   const ranks = orientation === "white" ? [8, 7, 6, 5, 4, 3, 2, 1] : [1, 2, 3, 4, 5, 6, 7, 8];
   const files = orientation === "white" ? [...FILES] : [...FILES].reverse();
@@ -437,7 +438,7 @@ function renderBoard() {
     if (sq === selected) el.classList.add("sel");
     if (targets.includes(sq)) el.classList.add("target", ...(p ? ["occ"] : []));
     if (inCheck && p && p.toLowerCase() === "k" && (p === "K") === (toMove === "w")) el.classList.add("check");
-    if (p) el.append(h("img", { src: pieceImg(p), draggable: "false" }));
+    if (p) el.append(h("img", { src: pieceImg(p), draggable: "false", style: hidden.has(sq) ? "visibility: hidden" : null }));
     if (fi === 0) el.append(h("span", { class: "coord r" }, r));
     if (ri === 7) el.append(h("span", { class: "coord f" }, f));
     board.append(el);
@@ -1152,7 +1153,7 @@ function renderAll() {
 }
 
 function setView(ply) {
-  if (!game) return;
+  if (!game || battleView != null) return;
   const before = shownPly();
   viewPly = ply >= game.san.length ? null : Math.max(0, ply);
   if (shownPly() === before + 1) animFrom = { id: game.id, ply: before };
@@ -1180,6 +1181,7 @@ async function poll(force = false) {
     const since = !force && game && game.id === currentId ? game.version : -1;
     const want = currentId;
     const s = await api(`/api/games/${currentId}?since=${since}`);
+    if (battleBusy) await battleBusy;  // let the fight on screen finish first
     if (s.unchanged || want !== currentId || (!s.unchanged && s.id !== currentId)) return;
     const first = !game || game.id !== s.id;
     const prev = first ? null : game;
@@ -1196,19 +1198,58 @@ async function poll(force = false) {
     else if (first && store.get("infoTab", "chat") === "teach" && !s.learning) setTab("chat");
     if (prev && !prev.human_turn && game.human_turn && game.my_sides?.length) navigator.vibrate?.(120);
     if (prev && prev.open_seats?.length && !game.open_seats?.length) sound("check");
-    if (prev && viewPly == null && game.san.length === prev.san.length + 1) {
+    const newPlies = prev && viewPly == null ? game.san.length - prev.san.length : 0;
+    const battle = battleOn() && newPlies >= 1 && newPlies <= 4;
+    const dragged = skipAnim;
+    if (!battle && newPlies === 1) {  // (a battle plays its own sounds)
       if (!skipAnim) animFrom = { id: game.id, ply: prev.san.length };
       const san = game.san[game.san.length - 1];
       sound(san.includes("#") || game.status === "finished" ? "end" : san.includes("+") ? "check" : san.includes("x") ? "capture" : "move");
-    } else if (prev && prev.status === "running" && game.status === "finished") sound("end");
+    } else if (!battle && prev && prev.status === "running" && game.status === "finished") sound("end");
     skipAnim = false;
     if (first) autoOrient();
     // when a match game ends, jump to the next one in the same match
     if (game.status === "finished" || game.status === "aborted") maybeFollowMatch();
-    renderAll();
+    if (battle) battleBusy = runBattles(prev.san.length, game.san.length, dragged).finally(() => { battleBusy = null; });
+    else renderAll();
   } catch (e) {
     if (String(e.message).includes("not found")) { currentId = null; game = null; store.set("currentId", null); renderAll(); }
   }
+}
+
+// battle mode: show the new moves one at a time as a little fight, then catch up to the live position
+let battleView = null, battleBusy = null;
+const battleOn = () => $("#battle").checked && Battle.ok();
+
+function battleMove(ply) {
+  const uci = game.uci[ply], before = parseFen(game.fens[ply]), after = parseFen(game.fens[ply + 1]);
+  const from = uci.slice(0, 2), to = uci.slice(2, 4), piece = before[from];
+  const white = piece === piece.toUpperCase(), foe = (p) => p && (p === p.toUpperCase()) !== white;
+  let victimSq = foe(before[to]) ? to : null;
+  if (!victimSq && piece.toLowerCase() === "p" && from[0] !== to[0]) victimSq = to[0] + from[1];  // en passant
+  let castle = null;
+  if (piece.toLowerCase() === "k" && Math.abs(FILES.indexOf(to[0]) - FILES.indexOf(from[0])) === 2) {
+    const [rf, rt] = to[0] === "g" ? ["h", "f"] : ["a", "d"];
+    castle = { from: rf + from[1], to: rt + from[1], piece: before[rf + from[1]] };
+  }
+  const san = game.san[ply];
+  const kingSq = /[+#]/.test(san) ? Object.keys(after).find((sq) => after[sq] === (white ? "k" : "K")) : null;
+  return { from, to, piece, victim: victimSq && before[victimSq], victimSq, castle, san, kingSq,
+    promo: uci[4] ? (white ? uci[4].toUpperCase() : uci[4]) : null };
+}
+
+async function runBattles(from, to, dragged) {
+  const id = game.id;
+  for (let ply = from; ply < to && game?.id === id; ply++) {
+    battleView = ply + 1;
+    renderAll();
+    try {
+      await Battle.play({ ...battleMove(ply), key: `${id}:${ply + 1}`, wrap: $(".board-wrap"), board: $("#board"), orient: orientation,
+        dragged: dragged && ply === from, end: ply === to - 1 && game.status === "finished", img: pieceImg, sound });
+    } catch (e) { console.error(e); }
+  }
+  battleView = null;
+  renderAll();
 }
 
 let followTimer = null;
@@ -1627,6 +1668,7 @@ $("#nav-next").onclick = () => game && setView(shownPly() + 1);
 $("#nav-last").onclick = () => setView(Infinity);
 $("#flip").onclick = () => { orientation = orientation === "white" ? "black" : "white"; manualFlip = true; renderAll(); };
 $("#sound").onchange = () => { store.set("sound", $("#sound").checked); if ($("#sound").checked) sound("move"); };
+$("#battle").onchange = () => store.set("battle", $("#battle").checked);
 $("#show-best").onchange = () => { store.set("showBest", $("#show-best").checked); renderBoard(); };
 $$(".tabs [data-tab]").forEach((b) => { b.onclick = () => setTab(b.dataset.tab); });
 $$("#opt-lang button").forEach((b) => { b.onclick = () => { lang = b.dataset.lang; renderLang(); }; });
@@ -1675,6 +1717,7 @@ document.addEventListener("keydown", (e) => {
   const profilesLoaded = loadProfiles();  // quick; the endpoint check below can take a few seconds
   $("#show-best").checked = store.get("showBest", false);
   $("#sound").checked = store.get("sound", true);
+  $("#battle").checked = store.get("battle", true);
   $("#show-reasoning").checked = store.get("showReasoning", false);
   $("#speak").checked = store.get("speak", false);
   $("#teach-arrows").checked = store.get("teachArrows", true);
