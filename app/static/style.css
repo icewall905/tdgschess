@@ -384,9 +384,6 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
 .spark { height: 50px; background: var(--card); border-radius: 10px; padding: 4px; }
 .spark svg { width: 100%; height: 100%; display: block; }
 .spark.empty { display: grid; place-items: center; color: var(--muted); font-size: 12px; font-weight: 700; }
-.emoji-pick { display: flex; flex-wrap: wrap; gap: 4px; }
-.emoji-pick button { font-size: 20px; padding: 2px 6px; border-radius: 10px; background: var(--card); }
-.emoji-pick button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
 @media (max-width: 640px) { .join-btn { padding: 6px 10px; font-size: 13px; } .live-strip { padding: 8px 12px 0; } }
 .profile-card .stats { font-size: 12px; font-weight: 600; white-space: nowrap; }
 .profile-card .top > div:nth-child(2) { min-width: 0; flex: 1; }
@@ -533,3 +530,22 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .st-dials { align-items: start; }
 .st-dial { align-content: start; }
 .st-dial input { height: auto; }
+/* picture picker */
+.icon-picker { display: grid; gap: 8px; }
+.icon-search { width: 100%; }
+.icon-tabs { display: flex; gap: 4px; overflow-x: auto; padding-bottom: 2px; }
+.icon-tabs button { flex: none; font-size: 13px; padding: 4px 10px; border-radius: 999px; background: var(--card); white-space: nowrap; }
+.icon-tabs button span { margin-left: 5px; font-weight: 700; }
+.icon-tabs button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--card)); }
+.icon-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(42px, 1fr)); gap: 4px; max-height: 236px; overflow-y: auto; padding: 2px; }
+.icon-grid button { font-size: 24px; line-height: 1; padding: 6px 0; border-radius: 10px; background: var(--card); }
+.icon-grid button:hover { transform: scale(1.12); }
+.icon-grid button.active { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--card)); }
+.icon-grid .muted { grid-column: 1 / -1; padding: 8px; }
+.pic-label { display: flex; align-items: center; gap: 10px; }
+.pic-label .big-emoji { width: 46px; height: 46px; font-size: 30px; }
+.pf-face { padding: 0; cursor: pointer; border: 2px dashed transparent; }
+.pf-face:hover { border-color: var(--accent); }
+.pf-pic-btn { margin-top: 10px; }
+.pf-picker { margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--bg2); }
+.pf-picker[hidden] { display: none; }

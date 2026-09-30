@@ -1289,6 +1289,29 @@ function showView(v) {
 const EMOJIS = ["🧔", "👩", "🌸", "🌟", "🦄", "🐼", "🦊", "🐯", "🐸", "🐱", "🐶", "🦖", "🚀", "⚽", "🎨", "👑", "🐙", "🦋"];
 let editing = null;
 
+// searchable picture picker (icons from emojis.js); calls onPick(emoji) and keeps the chosen one highlighted
+function iconPicker(current, onPick) {
+  const da = lang === "da";
+  let cat = null, chosen = current;
+  const search = h("input", { type: "search", class: "icon-search", placeholder: da ? "🔍 Søg: kat, raket, pizza…" : "🔍 Search: cat, rocket, pizza…" });
+  const tabs = h("div", { class: "icon-tabs" }), grid = h("div", { class: "icon-grid" });
+  const draw = () => {
+    const q = search.value.trim().toLowerCase();
+    tabs.replaceChildren(...[[null, "✨", da ? "Alle" : "All"], ...ICON_SETS.map(([c, en, d]) => [c, c, da ? d : en])].map(([c, icon, name]) =>
+      h("button", { type: "button", title: name, class: !q && c === cat ? "active" : "", onclick: () => { cat = c; search.value = ""; draw(); } }, icon, h("span", {}, name))));
+    const terms = q.split(/\s+/).filter(Boolean);
+    let list = q ? ICONS.filter((x) => terms.every((t) => x.e === t || x.words.split(" ").some((w) => w.startsWith(t)))) : ICONS.filter((x) => !cat || x.cat === cat);
+    // a pasted emoji that isn't in the list can still be picked
+    if (q && !list.length && EMOJI_RE.test(q)) list = [{ e: search.value.trim() }];
+    grid.replaceChildren(...(list.length ? list.map((x) => h("button", { type: "button", title: x.name || "", class: x.e === chosen ? "active" : "",
+      onclick: () => { chosen = x.e; onPick(x.e); draw(); } }, x.e)) : [h("div", { class: "muted small" }, da ? "Ingen billeder fundet – prøv et andet ord." : "No pictures found – try another word.")]));
+  };
+  search.addEventListener("input", draw);
+  draw();
+  return h("div", { class: "icon-picker" }, search, tabs, grid);
+}
+const EMOJI_RE = /\p{Extended_Pictographic}/u;
+
 function sparkline(hist) {
   const pts = hist.map((x) => x.rating);
   if (pts.length < 2) return h("div", { class: "spark empty" }, "no games yet");
@@ -1301,9 +1324,8 @@ function sparkline(hist) {
 
 function profileForm(p) {
   const f = { name: p?.name || "", emoji: p?.emoji || EMOJIS[profiles.length % EMOJIS.length], rating: p?.rating || 600 };
-  const emo = h("div", { class: "emoji-pick" });
-  const drawEmo = () => emo.replaceChildren(...EMOJIS.map((e) => h("button", { type: "button", class: e === f.emoji ? "active" : "", onclick: () => { f.emoji = e; drawEmo(); } }, e)));
-  drawEmo();
+  const preview = h("span", { class: "big-emoji" }, f.emoji);
+  const emo = iconPicker(f.emoji, (e) => { f.emoji = e; preview.textContent = e; });
   const save = async () => {
     try {
       if (p) await api(`/api/profiles/${p.id}`, { method: "PATCH", body: JSON.stringify(f) });
@@ -1313,7 +1335,7 @@ function profileForm(p) {
   };
   return h("div", { class: "profile-card editing" },
     h("label", {}, "Name", h("input", { value: f.name, maxlength: "40", oninput: (e) => (f.name = e.target.value) })),
-    h("label", {}, "Picture"), emo,
+    h("label", { class: "pic-label" }, preview, "Picture"), emo,
     h("label", {}, "Rating", h("input", { type: "number", min: "100", max: "3000", step: "10", value: f.rating, oninput: (e) => (f.rating = Number(e.target.value)) })),
     h("div", { class: "row" }, h("button", { class: "primary", type: "button", onclick: save }, p ? "Save" : "Add player"),
       h("button", { type: "button", onclick: () => { editing = null; renderProfiles(); } }, "Cancel")));
@@ -1378,10 +1400,22 @@ async function renderProfilePage() {
       renderProfilePage();
     } catch (e) { pinMsg.textContent = e.message; }
   };
+  const picMsg = h("div", { class: "muted small" });
+  const picker = h("div", { class: "pf-picker", hidden: true }, iconPicker(p.emoji, async (e) => {
+    try {
+      await api(`/api/profiles/${p.id}`, { method: "PATCH", body: JSON.stringify({ emoji: e }) });
+      p.emoji = e; face.textContent = e; picMsg.textContent = "";
+      await loadProfiles(); renderSetup();
+    } catch (err) { picMsg.textContent = err.message; }
+  }), picMsg);
+  const face = h("button", { type: "button", class: "big-emoji pf-face", title: da ? "Skift billede" : "Change picture",
+    onclick: () => { picker.hidden = !picker.hidden; } }, p.emoji);
   el.replaceChildren(
-    h("div", { class: "pf-head" }, h("span", { class: "big-emoji" }, p.emoji),
+    h("div", { class: "pf-head" }, face,
       h("div", {}, h("h2", {}, p.name), h("div", { class: "muted" }, `⭐ ${p.rating} · ${p.games} ${da ? "partier" : "games"} · ${p.w}W ${p.d}D ${p.l}L`)),
       h("button", { type: "button", onclick: () => chooseMe(null) }, da ? "Skift til gæst" : "Switch to guest")),
+    h("button", { type: "button", class: "pf-pic-btn", onclick: () => { picker.hidden = !picker.hidden; } }, da ? "🎨 Skift billede" : "🎨 Change picture"),
+    picker,
     sparkline(p.history || []),
     h("h3", {}, da ? "🔒 PIN-lås" : "🔒 PIN lock"),
     h("p", { class: "muted" }, p.locked
