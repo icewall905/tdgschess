@@ -105,7 +105,7 @@ header {
 header nav { margin: 0 auto; }
 
 /* ------------------------------------------------------------ layout */
-main { padding: 16px 20px 24px; }
+main { padding: 16px 20px; }
 .view { display: none; }
 .view.active { display: flex; animation: fade .25s ease; }
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } }
@@ -116,7 +116,7 @@ main { padding: 16px 20px 24px; }
 .card-head h2 { margin: 0; }
 
 /* ------------------------------------------------------------ setup */
-.setup { width: 310px; flex: none; max-height: calc(100vh - 96px); overflow-y: auto; position: sticky; top: 78px; }
+.setup { width: 310px; flex: none; max-height: calc(100vh - 96px - var(--above, 0px)); overflow-y: auto; position: sticky; top: 78px; }
 .setup::-webkit-scrollbar, .info *::-webkit-scrollbar { width: 8px; }
 .setup::-webkit-scrollbar-thumb, .info *::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 8px; }
 .setup-tab { flex: none; position: sticky; top: 78px; width: 44px; padding: 12px 0; display: flex; flex-direction: column; align-items: center; gap: 10px; font-size: 20px; color: var(--accent); }
@@ -145,11 +145,11 @@ main { padding: 16px 20px 24px; }
 .stage { flex: none; display: flex; flex-direction: column; gap: 10px; }
 .board-wrap { display: flex; gap: 10px; }
 .board {
-  --sz: min(calc(100vh - 370px), calc(100vw - 800px)); width: var(--sz); height: var(--sz); min-width: 320px; min-height: 320px;
+  --sz: min(calc(100vh - 370px - var(--above, 0px)), calc(100vw - 800px)); width: var(--sz); height: var(--sz); min-width: 260px; min-height: 260px;
   display: grid; grid-template: repeat(8, 1fr) / repeat(8, 1fr); border-radius: 14px; overflow: hidden; user-select: none;
   touch-action: none; position: relative; box-shadow: var(--shadow-lg), 0 0 0 6px var(--card), 0 0 0 7px var(--line);
 }
-body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)); }
+body.setup-collapsed .board { --sz: min(calc(100vh - 370px - var(--above, 0px)), calc(100vw - 500px)); }
 .sq { position: relative; display: flex; align-items: center; justify-content: center; }
 .sq.l { background: var(--light); } .sq.d { background: var(--dark); }
 .sq.last::after, .sq.sel::after { content: ""; position: absolute; inset: 0; background: var(--last); pointer-events: none; }
@@ -229,7 +229,7 @@ body.setup-collapsed .board { --sz: min(calc(100vh - 370px), calc(100vw - 500px)
 .evalgraph { height: 64px; margin-left: 26px; border-radius: 12px; cursor: pointer; box-shadow: var(--shadow); border: 1px solid var(--line); }
 
 /* ------------------------------------------------------------ info panel */
-.info { flex: 1; min-width: 300px; height: calc(100vh - 96px); display: flex; flex-direction: column; position: sticky; top: 78px; padding: 14px; }
+.info { flex: 1; min-width: 300px; height: calc(100vh - 96px - var(--above, 0px)); display: flex; flex-direction: column; position: sticky; top: 78px; padding: 14px; }
 .status { font-weight: 800; font-size: 15px; padding: 10px 14px; margin-bottom: 10px; border-radius: 14px; background: var(--card2); border: 1px solid var(--line); }
 .status.live { background: color-mix(in srgb, var(--accent) 9%, var(--card)); border-color: color-mix(in srgb, var(--accent) 30%, var(--line)); }
 .status.win { background: linear-gradient(135deg, color-mix(in srgb, var(--good) 18%, var(--card)), color-mix(in srgb, var(--accent2) 14%, var(--card))); border-color: color-mix(in srgb, var(--good) 40%, var(--line)); animation: pop .45s cubic-bezier(.3, 1.6, .5, 1); }

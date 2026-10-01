@@ -1652,6 +1652,9 @@ $$("nav button").forEach((b) => b.addEventListener("click", () => showView(b.dat
 $$("[data-preset]").forEach((b) => b.addEventListener("click", () => applyPreset(b.dataset.preset)));
 $("#swap-sides").onclick = () => { setup = { white: setup.black, black: setup.white }; store.set("setup", setup); renderSetup(); };
 $("#start").onclick = startGame;
+// the live-games strip sits above the board: size the board and side panels to what's left of the window
+new ResizeObserver(([e]) => document.documentElement.style.setProperty("--above", `${Math.ceil(e.borderBoxSize?.[0]?.blockSize ?? e.target.offsetHeight)}px`))
+  .observe($("#live-strip"));
 function setTheme(t) {
   if (t) document.documentElement.dataset.theme = t; else delete document.documentElement.dataset.theme;
   const dark = t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
