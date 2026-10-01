@@ -12,7 +12,7 @@ from typing import Optional
 import chess
 import httpx
 
-from app import coach
+from app import coach, danish
 
 JOBS: dict[tuple[str, str], asyncio.Task] = {}
 PARALLEL_LLM = 3  # LLM calls in flight at once (Stockfish analysis itself is sequential)
@@ -156,7 +156,7 @@ async def llm(endpoint: str, model: str, system: str, user: str, max_tokens: int
                 r.raise_for_status()
                 text = m.THINK_RE.sub("", r.json()["choices"][0]["message"].get("content") or "").strip()
                 if text:
-                    return text
+                    return danish.fix(text) if coach.TEXT["da"]["lang"] in system else text
         except Exception as e:
             print(f"recap LLM call failed: {e!r}", file=sys.stderr, flush=True)
             await asyncio.sleep(2)

@@ -378,7 +378,12 @@ function applyPreset(p) {
 }
 
 async function startGame() {
+  const btn = $("#start");
+  if (btn.disabled) return;
   $("#setup-err").textContent = "";
+  btn.disabled = true;
+  btn.classList.add("busy");
+  btn.textContent = "Starting…";
   try {
     const body = {
       white: meSide() === "white" ? { ...setup.white, profile: myProfile } : setup.white,
@@ -395,8 +400,9 @@ async function startGame() {
     };
     if (body.learning && setup.white.type !== "human" && setup.black.type !== "human") throw new Error("Learning mode needs a human player (you!)");
     const r = await api("/api/games", { method: "POST", body: JSON.stringify(body) });
-    openGame(r.ids[0]);
+    await openGame(r.ids[0]);
   } catch (e) { $("#setup-err").textContent = e.message; }
+  finally { btn.disabled = false; btn.classList.remove("busy"); btn.textContent = "▶ Start game"; }
 }
 
 // ------------------------------------------------------------ board
@@ -761,6 +767,10 @@ function renderStatus() {
     const side = game.open_seats[0];
     el.replaceChildren(h("span", { class: "sub" }, "Join code"), h("span", { class: "code-digits" }, game.code),
       h("span", { class: "sub" }, `Waiting for ${side === "white" ? "⚪ White" : "⚫ Black"} — on the other device tap 🔑 Join`));
+  } else if (game.status === "running" && game.starting) {
+    el.classList.add("live");
+    el.replaceChildren(h("span", { class: "big" }, h("span", { class: "spinner" }), "Getting ready…"),
+      h("span", { class: "sub" }, "Waking up Stockfish — the game starts in a moment."));
   } else if (game.status === "running") {
     el.classList.add("live");
     const p = game[game.turn];

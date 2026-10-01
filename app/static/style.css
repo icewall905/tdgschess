@@ -562,3 +562,10 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .pf-pic-btn { margin-top: 10px; }
 .pf-picker { margin-top: 10px; padding: 12px; border-radius: 14px; background: var(--bg2); }
 .pf-picker[hidden] { display: none; }
+
+.spinner { display: inline-block; width: 0.9em; height: 0.9em; margin-right: 8px; vertical-align: -0.1em; border-radius: 50%;
+  border: 3px solid color-mix(in srgb, currentColor 25%, transparent); border-top-color: currentColor; animation: spin .8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+button.busy::before { content: ""; display: inline-block; width: 0.9em; height: 0.9em; margin-right: 8px; vertical-align: -0.1em; border-radius: 50%;
+  border: 3px solid color-mix(in srgb, currentColor 30%, transparent); border-top-color: currentColor; animation: spin .8s linear infinite; }
+button.busy { cursor: progress; opacity: .85; }

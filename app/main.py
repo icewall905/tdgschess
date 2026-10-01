@@ -23,7 +23,7 @@ from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, PrivateAttr
 
-from app import coach, recap
+from app import coach, danish, recap
 
 # ---------------------------------------------------------------- config
 
@@ -268,9 +268,51 @@ HIBERNATE_AFTER = float(os.environ.get("HIBERNATE_AFTER", "3600"))
 QUIET_BEFORE_LLM = float(os.environ.get("QUIET_BEFORE_LLM", "2.5"))  # s without a new move before optional LLM talk
 
 
+BASE_ENGINE_OPTIONS = {"Threads": 2, "Hash": 32}  # what every engine here runs with
+SPARE_ENGINES = 2  # booted ahead: a new game takes its player and the eval bar engine from here at once
+SPARES: list = []
+_refill_task: Optional[asyncio.Task] = None
+
+
+async def boot_engine():
+    _, engine = await chess.engine.popen_uci(STOCKFISH_PATH)
+    await engine.configure(BASE_ENGINE_OPTIONS)
+    await engine.ping()  # Hash/Threads are applied here, not on the first search
+    return engine
+
+
+async def _refill_spares():
+    global _refill_task
+    try:
+        while len(SPARES) < SPARE_ENGINES:
+            try:
+                SPARES.append(await boot_engine())
+            except Exception:
+                return
+    finally:
+        _refill_task = None
+
+
+def refill_spares():
+    """Booting Stockfish can take 10 s+ on a busy host, so keep a couple ready in the background."""
+    global _refill_task
+    if _refill_task is None and len(SPARES) < SPARE_ENGINES:
+        _refill_task = asyncio.create_task(_refill_spares())
+
+
+async def take_engine():
+    while SPARES:
+        engine = SPARES.pop()
+        if not engine.returncode.done():
+            refill_spares()
+            return engine
+    refill_spares()
+    return await boot_engine()
+
+
 class LazyEngine:
-    """A Stockfish process started on demand and shut down after ENGINE_IDLE seconds without use, so games left
-    waiting for a human (and idle shared engines) don't hold memory. Restarts transparently, same options."""
+    """A Stockfish process taken on demand (from the warm spares) and handed back or shut down after ENGINE_IDLE
+    seconds without use, so games left waiting for a human (and idle shared engines) don't hold memory."""
 
     def __init__(self, options: dict):
         self.options = options
@@ -284,8 +326,11 @@ class LazyEngine:
         if self.engine is not None and self.engine.returncode.done():
             self.engine = None
         if self.engine is None:
-            _, self.engine = await chess.engine.popen_uci(STOCKFISH_PATH)
-            await self.engine.configure(self.options)
+            engine = await take_engine()
+            extra = {k: v for k, v in self.options.items() if BASE_ENGINE_OPTIONS.get(k) != v}
+            if extra:
+                await engine.configure(extra)
+            self.engine = engine
         return self.engine
 
     def release(self):
@@ -303,6 +348,15 @@ class LazyEngine:
             self.idle_task.cancel()
             self.idle_task = None
         engine, self.engine = self.engine, None
+        if engine and not engine.returncode.done() and len(SPARES) < SPARE_ENGINES:
+            try:  # back to the spares, as a plain full-strength engine
+                if self.options.get("UCI_LimitStrength"):
+                    await asyncio.wait_for(engine.configure({"UCI_LimitStrength": False}), 5)
+                await asyncio.wait_for(engine.ping(), 5)
+                SPARES.append(engine)
+                return
+            except Exception:
+                pass
         if engine:
             try:
                 await asyncio.wait_for(engine.quit(), 5)
@@ -1251,7 +1305,8 @@ def chat_lang_line(game) -> str:
     if getattr(game, "opts", None) and game.opts.lang == "da":
         return ("Write the chat message in Danish (dansk), with the right Danish chess words: bonde (pawn), springer "
                 "(knight), løber (bishop), tårn (rook), dronning (queen), konge (king), skak (check), skakmat "
-                "(checkmate), rokade (castling). Only Danish words: no English words, no English words in "
+                "(checkmate), rokade (castling). Mind en/et: et tårn, tårnet, mit tårn; et træk, mit træk; et felt; "
+                "en plan, min plan; en fejl, din fejl. Only Danish words: no English words, no English words in "
                 "parentheses, no English exclamations like Uh-oh, Whoa, Wow or Oops. Any MOVE line stays in "
                 "standard English chess notation.")
     return "Write the chat message in English."
@@ -1445,6 +1500,7 @@ class Game:
         self.stats = {"white": new_stats(), "black": new_stats()}
         self.evals: list = []
         self.thinking_since: Optional[float] = None
+        self.starting = True  # getting the engines ready before the first move
         self.human_moves: asyncio.Queue = asyncio.Queue()
         self.awaiting_human = False
         self.created = time.time()
@@ -1554,6 +1610,11 @@ class Game:
         return spec._seat == cid
 
     def add_log(self, entry: dict):
+        bot = entry.get("bot") or entry.get("kind") in ("teach", "comment")  # never touch what the players type
+        if bot and self.opts.lang == "da" and entry.get("say"):
+            if entry.get("kind") == "comment" and danish.looks_english(entry["say"]):
+                return  # an optional comment that slipped into English: skip it
+            entry["say"] = danish.fix(entry["say"])
         self.log.append(entry)
         self.touch()
 
@@ -1608,10 +1669,11 @@ class Game:
         players = {chess.WHITE: make_player(self.white, chess.WHITE, self),
                    chess.BLACK: make_player(self.black, chess.BLACK, self)}
         try:
-            for p in players.values():
-                await p.start()
-            if self.opts.analysis and not self.evals:
-                self.evals.append(await ANALYZER.evaluate(self.board))
+            first_eval = ANALYZER.evaluate(self.board) if self.opts.analysis and not self.evals else None
+            *_, ev = await asyncio.gather(*(p.start() for p in players.values()), first_eval or asyncio.sleep(0))
+            if first_eval:
+                self.evals.append(ev)
+            self.starting = False
             while True:
                 b = self.board
                 outcome = b.outcome(claim_draw=True)
@@ -1719,6 +1781,7 @@ class Game:
             "remote_sides": [side for side, sp in (("white", self.white), ("black", self.black))
                              if sp.type == "human" and sp.remote],
             "learning": self.opts.learning,
+            "starting": self.status == "running" and self.starting,
         }
         if not full:
             return s
@@ -2115,6 +2178,7 @@ async def hibernate_idle_games():
 @app.on_event("startup")
 async def start_hibernator():
     asyncio.create_task(hibernate_idle_games())
+    refill_spares()
 
 
 @app.on_event("shutdown")

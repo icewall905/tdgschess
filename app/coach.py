@@ -29,7 +29,8 @@ TEXT = {
            "lang": "Always answer in English."},
     "da": {"undone": "↩️ Trækket er taget tilbage — prøv igen!", "kept": "OK, vi beholder trækket. Lad os se, hvad der sker!",
            "away": "Læreren holder en lille pause — prøv igen om lidt! ☕",
-           "lang": "Svar altid på dansk (Danish). Brug danske skaknavne: bonde, springer, løber, tårn, dronning, konge."},
+           "lang": "Svar altid på dansk (Danish). Brug danske skaknavne: bonde, springer, løber, tårn, dronning, konge. "
+                   "Pas på en/et: et tårn, tårnet, mit tårn; et træk, mit træk; et felt; en plan, min plan; en fejl, din fejl."},
 }
 
 
