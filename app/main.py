@@ -1154,12 +1154,30 @@ def default_llm() -> tuple[str, str]:
     return next(iter(ENDPOINTS), ""), "currentmodel"
 
 
-def talker(spec: PlayerSpec) -> tuple[str, str]:
+# which model does which job (settings page); unset = deep falls back to chat, chat to the default LLM
+LLM_ROLES = {
+    "chat": ("Quick chat", "Engine comments, chat replies, teacher explanations and closing messages. Should be fast."),
+    "deep": ("Deep analysis", "Recaps and \"why?\" questions. Can be slower and smarter."),
+}
+
+
+def role_set(role: str) -> Optional[tuple[str, str]]:
+    r = (SETTINGS.get("llm_roles") or {}).get(role) or {}
+    return (r["endpoint"], r["model"]) if r.get("endpoint") in ENDPOINTS and r.get("model") else None
+
+
+def role_llm(role: str) -> tuple[str, str]:
+    return role_set(role) or (role_llm("chat") if role != "chat" else default_llm())
+
+
+def talker(spec: PlayerSpec, deep: bool = False) -> tuple[str, str]:
     if spec.type == "llm":
-        return spec.endpoint, spec.model
+        return spec.endpoint, spec.model  # an LLM player always talks as itself
+    if deep and role_set("deep"):
+        return role_set("deep")
     if spec.comment_endpoint and spec.comment_model:
         return spec.comment_endpoint, spec.comment_model
-    return default_llm()
+    return role_llm("chat")
 
 
 async def chat_reply(game, side: str, spec: PlayerSpec):
@@ -1173,13 +1191,13 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
     convo = [e for e in game.log if e.get("kind") == "chat"][-8:]
     history = "\n".join(f"{'You' if e.get('bot') and e['side'] == side else game.spec_for(e['side'] == 'white').label()}: {e['say']}"
                         for e in convo)
-    endpoint, model = talker(spec)
+    asked = " ".join(unread).lower()
+    deep = bool(DEEP_Q.search(asked))
+    endpoint, model = talker(spec, deep)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     persona = spec.persona.strip() or "a cheerful chess buddy"
     helping, arrows = "", []
     opp = game.spec_for(not color)
-    asked = " ".join(unread).lower()
-    deep = bool(DEEP_Q.search(asked))
     wants_help = deep or bool(HELP_Q.search(asked))
     if opp.type == "human":  # the player's own side, in case they ask for a hint
         try:
@@ -1193,6 +1211,8 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
         except Exception:
             pass
     guard = style_guard(game, side)
+    if game.status == "finished":  # chatting after the end: the result comes first, so nobody is told the wrong winner
+        facts = result_facts(game, side) + facts
     user = ("Chess facts (from Stockfish, from your side):\n" + "\n".join(f"- {f}" for f in facts + guard) + helping
             + f"\n\nRecent chat:\n{history}\n\nNew messages to answer:\n" + "\n".join(f"- {m}" for m in unread)
             + ("\n\nThey want to understand WHY. Explain it like to a child, in 4-5 short, simple sentences: the move "
@@ -1214,14 +1234,37 @@ async def chat_reply(game, side: str, spec: PlayerSpec):
 
 
 CLOSING_PROMPT = """You are {persona}, and a chess game you played as {color} against {opp} just ended. Write the \
-closing message a friendly human opponent would say (2-3 short sentences): a warm "good game" that fits the \
-result (congratulate them if they won, be a good sport; if you won, be kind and encouraging), what decided the \
-game (the key moment from the facts), and ONE concrete tip that fits the result: if they won, name what worked or \
-a next step to get even better; if they lost, what to watch for next time. Only name moves that appear in \
-the facts - never invent moves. In character, kid-friendly, at most two emojis. Reply with only the message. {lang}"""
+closing message a friendly human opponent would say to {opp} (2-3 short sentences). {outcome} Also say what decided \
+the game (the key moment from the facts). Read the facts carefully: they say who won and who played each move - \
+never mix that up. Only name moves that appear in the facts - never invent moves. In character, kid-friendly, at \
+most two emojis. Reply with only the message. {lang}"""
+
+# what the closing message must do, seen from the bot: the model is told the outcome, it doesn't work it out
+CLOSING_OUTCOME = {
+    "lost": "{opp} WON and you LOST. Congratulate {opp} warmly on the win and be a good sport. Give ONE tip about "
+            "what {opp} did well or a next step to get even better - never a tip on how to avoid losing.",
+    "won": "You WON and {opp} LOST. Be kind and encouraging, and give {opp} ONE concrete tip on what to watch for "
+           "next time.",
+    "draw": "The game was a DRAW - nobody won. Say it was a close fight and give {opp} ONE concrete tip.",
+}
 
 
-def key_moment(game) -> Optional[str]:
+def result_facts(game, side: str) -> list[str]:
+    """Who won, in plain words with names, from `side`'s point of view ("you")."""
+    color = side == "white"
+    opp = game.spec_for(not color).label()
+    win = "1-0" if color else "0-1"
+    you = f"You played {'White' if color else 'Black'}, {opp} played {'Black' if color else 'White'}."
+    if game.result == "1/2-1/2":
+        return [you, f"The game is over: it was a draw ({game.termination}). Nobody won."]
+    if game.result == win:
+        return [you, f"The game is over: YOU WON and {opp} lost ({game.termination})."]
+    if game.result in ("1-0", "0-1"):
+        return [you, f"The game is over: {opp} WON and you lost ({game.termination}). Congratulate {opp}!"]
+    return [you, f"The game is over ({game.termination or game.status}), without a winner."]
+
+
+def key_moment(game, names: Optional[dict] = None) -> Optional[str]:
     """The move that swung the game most, from the eval bar's scores."""
     ev = game.evals
     if len(ev) < 3:
@@ -1240,19 +1283,22 @@ def key_moment(game) -> Optional[str]:
     if not when or best < 0.2:
         return None
     n, turn, words = when
-    return f"The turning point was move {n}: {'White' if turn else 'Black'} played {words}"
+    who = (names or {}).get(turn) or ("White" if turn else "Black")
+    return f"The turning point was move {n}: {who} played {words}"
 
 
 async def closing_chat(game, side: str, spec: PlayerSpec):
     color = side == "white"
     win = "1-0" if color else "0-1"
-    outcome = "you won" if game.result == win else "it was a draw" if game.result == "1/2-1/2" else "you lost"
-    facts = [f"Result: {game.result} ({game.termination}) - {outcome}"]
+    outcome = "won" if game.result == win else "draw" if game.result not in ("1-0", "0-1") else "lost"
+    opp = game.spec_for(not color).label()
+    names = {color: "you", not color: opp}  # moves are told by who played them, not by colour
+    facts = result_facts(game, side)
     if game.board.move_stack:
         b = game.board.copy()
         last = b.pop()
-        facts.append(f"The final move: {'White' if b.turn else 'Black'} played {move_words(b, last)}")
-    km = key_moment(game)
+        facts.append(f"The final move: {names[b.turn]} played {move_words(b, last)}")
+    km = key_moment(game, names)
     if km:
         facts.append(km)
     opening = opening_of(game.board)
@@ -1261,13 +1307,13 @@ async def closing_chat(game, side: str, spec: PlayerSpec):
     other = "black" if color else "white"
     r = (game.ratings or {}).get(other)
     if r and r.get("delta") is not None:
-        facts.append(f"The other player's rating went {r['before']} -> {r['after']}")
+        facts.append(f"{opp}'s rating went {r['before']} -> {r['after']}")
     endpoint, model = talker(spec)
     base = ENDPOINTS.get(endpoint or "", endpoint or "")
     body = {"model": model, "temperature": 0.8, "max_tokens": 300, "chat_template_kwargs": {"enable_thinking": False},
             "messages": [{"role": "system", "content": CLOSING_PROMPT.format(
                 persona=spec.persona.strip() or "a cheerful chess buddy", color="White" if color else "Black",
-                opp=game.spec_for(not color).label(), lang=chat_lang_line(game))},
+                opp=opp, outcome=CLOSING_OUTCOME[outcome].format(opp=opp), lang=chat_lang_line(game))},
                 {"role": "user", "content": "\n".join(f"- {f}" for f in facts)}]}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(90, connect=10)) as client:
@@ -2012,6 +2058,7 @@ async def config():
                        "model_info": {mid: info(n, mid) for mid in (m or [])}}
                       for (n, u), m in zip(ENDPOINTS.items(), results)],
         "max_plies": MAX_PLIES,
+        "roles": {r: dict(zip(("endpoint", "model"), role_llm(r))) for r in LLM_ROLES},
     }
 
 
@@ -2052,7 +2099,8 @@ async def create(req: NewGame, x_client_id: Optional[str] = Header(None),
     if req.learning:
         if "human" not in (req.white.type, req.black.type):
             raise HTTPException(400, "learning mode needs a human player")
-        req.teacher_endpoint = req.teacher_endpoint or next(iter(ENDPOINTS), None)
+        if not req.teacher_endpoint:
+            req.teacher_endpoint, req.teacher_model = role_llm("chat")
         if not req.teacher_endpoint or req.teacher_endpoint not in ENDPOINTS:
             raise HTTPException(400, "learning mode needs a teacher LLM endpoint")
     n = max(1, min(100, req.games))
@@ -2659,6 +2707,7 @@ class SettingsReq(BaseModel):
     endpoints: Optional[list[dict]] = None
     api_key: Optional[str] = None  # "" = back to .env
     new_admin_pin: Optional[str] = None  # "" removes it
+    llm_roles: Optional[dict] = None  # {"chat": {"endpoint", "model"}, ...}; empty model = auto
 
 
 def require_admin(pin: Optional[str]):
@@ -2681,11 +2730,15 @@ def settings_view() -> dict:
         "endpoints_from": "settings" if SETTINGS.get("endpoints") else ".env",
         "api_key_set": bool(SETTINGS.get("api_key")),
         "admin_locked": bool(SETTINGS.get("admin_pin_hash")),
+        "llm_roles": [{"key": r, "label": label, "help": help_, "set": (SETTINGS.get("llm_roles") or {}).get(r),
+                       "auto": dict(zip(("endpoint", "model"), role_llm("chat") if r != "chat" else default_llm()))}
+                      for r, (label, help_) in LLM_ROLES.items()],
     }
 
 
 @app.get("/api/settings")
 async def get_settings():
+    await asyncio.gather(*(probe_endpoint(n, u) for n, u in ENDPOINTS.items()))  # real model names for "Auto (...)"
     return settings_view()
 
 
@@ -2715,6 +2768,13 @@ async def put_settings(req: SettingsReq, x_admin_pin: Optional[str] = Header(Non
         else:
             SETTINGS.pop("api_key", None)
             globals()["API_KEY"] = os.environ.get("LLM_API_KEY", "none")
+    if req.llm_roles is not None:
+        roles = {}
+        for r, v in req.llm_roles.items():
+            ep, mid = ((v or {}).get("endpoint") or "").strip(), ((v or {}).get("model") or "").strip()
+            if r in LLM_ROLES and ep and mid:
+                roles[r] = {"endpoint": ep, "model": mid}
+        SETTINGS["llm_roles"] = roles
     if req.new_admin_pin is not None:
         if req.new_admin_pin.strip():
             SETTINGS["admin_pin_salt"], SETTINGS["admin_pin_hash"] = pin_hash(valid_pin(req.new_admin_pin))

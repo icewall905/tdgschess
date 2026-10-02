@@ -394,10 +394,13 @@ don't say it, don't claim it. Never invent moves or pieces.
 - {lang}"""
 
 
-def teacher_of(game) -> tuple[str, str, str]:
-    o = game.opts
-    ep = o.teacher_endpoint or next(iter(main().ENDPOINTS), "")
-    return main().ENDPOINTS.get(ep, ep), o.teacher_model or "currentmodel", o.lang if o.lang in TEXT else "en"
+def teacher_of(game, deep: bool = False) -> tuple[str, str, str]:
+    """Endpoint URL, model and language; "why?" questions go to the deep-analysis model when one is set."""
+    o, m = game.opts, main()
+    ep, model = (deep and m.role_set("deep")) or (o.teacher_endpoint, o.teacher_model)
+    if not (ep and model):
+        ep, model = m.role_llm("chat")
+    return m.ENDPOINTS.get(ep, ep), model, o.lang if o.lang in TEXT else "en"
 
 
 def learner(game) -> tuple[bool, str]:
@@ -407,9 +410,9 @@ def learner(game) -> tuple[bool, str]:
     return color, f"{spec.name or 'the child'} ({'White' if color else 'Black'})"
 
 
-async def llm(game, user: str, max_tokens: int = 350) -> Optional[str]:
+async def llm(game, user: str, max_tokens: int = 350, deep: bool = False) -> Optional[str]:
     """The teacher's answer, or None if the endpoint is unavailable (callers decide what the child sees)."""
-    base, model, lang = teacher_of(game)
+    base, model, lang = teacher_of(game, deep)
     color, who = learner(game)
     spec = game.white if color else game.black
     system = SYSTEM.format(name=f" named {spec.name}" if spec.name else "", color="White" if color else "Black",
@@ -586,7 +589,7 @@ async def answer(game, question: str) -> dict:
                "idea, what it concretely does on the board (from 'why it is good'), what will probably happen next, "
                "and the chess rule of thumb behind it; if listed, one tempting move to avoid." if deep else
                "Answer kindly and simply in 2-5 short sentences.") + " Use only the engine facts.")
-    text = await llm(game, user, 600 if deep else 450) or away(game)
+    text = await llm(game, user, 600 if deep else 450, deep) or away(game)
     arrows = [x for r in checked for x in r["arrows"]][:4]
     add_teach(game, text, arrows, [s for r in checked for s in r["squares"]], reply_to=question)
     return {"ok": True}

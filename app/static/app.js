@@ -162,6 +162,14 @@ for (const side of ["white", "black"]) {
   if (setup[side].type === "llm" && setup[side].engine_hints === undefined) Object.assign(setup[side], { engine_hints: true, show_legal: false });  // hints became the default
 }
 
+// the quick-chat model from the settings (or the first online one): default for comments and the teacher
+function chatModel() {
+  const r = config.roles?.chat;
+  if (r?.endpoint && config.endpoints.some((x) => x.name === r.endpoint)) return r;
+  const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
+  return ep ? { endpoint: ep.name, model: ep.models?.[0] || "" } : null;
+}
+
 function firstModel(idx = 0) {
   const online = config.endpoints.filter((e) => e.online && e.models?.length);
   const pool = online.length ? online : config.endpoints;
@@ -177,8 +185,8 @@ function commentaryFields(s, side, box) {
     onchange: (e) => {
       s.commentary = e.target.checked;
       if (s.commentary && !s.comment_model) {
-        const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
-        if (ep) { s.comment_endpoint = ep.name; s.comment_model = ep.models?.[0] || ""; }
+        const c = chatModel();
+        if (c) { s.comment_endpoint = c.endpoint; s.comment_model = c.model; }
       }
       rerender();
     },
@@ -343,8 +351,8 @@ function renderLearnCard() {
   box.classList.toggle("on", !!learnCfg.on);
   if (!learnCfg.on) return;
   if (!learnCfg.endpoint) {
-    const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
-    if (ep) { learnCfg.endpoint = ep.name; learnCfg.model = ep.models?.[0] || ""; store.set("learn", learnCfg); }
+    const c = chatModel();
+    if (c) { learnCfg.endpoint = c.endpoint; learnCfg.model = c.model; store.set("learn", learnCfg); }
   }
   const ep = config.endpoints.find((x) => x.name === learnCfg.endpoint);
   box.append(
@@ -940,8 +948,15 @@ function renderReact() {
     try { await api(`/api/games/${game.id}/say`, { method: "POST", body: JSON.stringify({ text }) }); } catch (e) { alert(e.message); }
   };
   const input = h("input", { placeholder: "Say something…", maxlength: "140" });
+  // put the emoji where the cursor is, so it can go into the message being typed
+  const addEmoji = (r) => {
+    const a = input.selectionStart ?? input.value.length, b = input.selectionEnd ?? a;
+    if (input.value.length - (b - a) + r.length > 140) return;
+    input.setRangeText(r, a, b, "end");
+    input.focus();
+  };
   el.replaceChildren(
-    h("div", { class: "emojis" }, ...REACTIONS.map((r) => h("button", { type: "button", onclick: () => say(r) }, r))),
+    h("div", { class: "emojis" }, ...REACTIONS.map((r) => h("button", { type: "button", onclick: () => addEmoji(r) }, r))),
     h("form", { onsubmit: (e) => { e.preventDefault(); say(input.value); input.value = ""; } }, input, h("button", { type: "submit" }, "Send")));
 }
 
@@ -1536,6 +1551,24 @@ async function renderSettings() {
   }), h("button", { type: "button", onclick: () => { eps.push({ name: "", url: "" }); drawEps(); } }, "＋ Add endpoint"));
   drawEps();
   const key = h("input", { type: "password", placeholder: st.api_key_set ? "•••••• (set - type to replace)" : "API key (empty = from .env)", autocomplete: "off" });
+  // which model does which job
+  const roleMsg = h("span", { class: "muted" });
+  const roles = Object.fromEntries(st.llm_roles.map((r) => [r.key, { endpoint: r.set?.endpoint || "", model: r.set?.model || "" }]));
+  const roleBox = h("div", { class: "st-roles" });
+  const drawRoles = () => roleBox.replaceChildren(...st.llm_roles.map((r) => {
+    const v = roles[r.key], ep = config.endpoints.find((x) => x.name === v.endpoint);
+    const auto = r.auto?.model ? `${r.auto.endpoint} · ${r.auto.model}` : "—";
+    return h("div", { class: "st-role" },
+      h("span", { class: "st-label" }, r.label), h("span", { class: "muted small" }, r.help),
+      h("div", { class: "grid2" },
+        h("label", {}, "Endpoint", h("select", {
+          onchange: (e) => { v.endpoint = e.target.value; const x = config.endpoints.find((y) => y.name === v.endpoint); v.model = v.endpoint ? (x?.models?.[0] || "") : ""; drawRoles(); },
+        }, h("option", { value: "", selected: !v.endpoint }, `Auto (${auto})`),
+          ...config.endpoints.map((x) => h("option", { value: x.name, selected: x.name === v.endpoint }, `${x.name}${x.online ? "" : " (offline)"}`)))),
+        h("label", {}, "Model", h("input", { value: v.model, disabled: !v.endpoint, list: `role-models-${r.key}`, oninput: (e) => (v.model = e.target.value) }),
+          h("datalist", { id: `role-models-${r.key}` }, ...(ep?.models || []).map((m) => h("option", { value: m }))))));
+  }));
+  drawRoles();
   // admin PIN
   const adminMsg = h("span", { class: "muted" });
   const newAdmin = h("input", { type: "password", inputmode: "numeric", maxlength: "8", placeholder: "4-8 digits" });
@@ -1549,7 +1582,7 @@ async function renderSettings() {
       save({ dials: v }, dialMsg).then((ok) => ok && renderSettings());
     } }, "Save dials"), dialMsg),
     h("h3", {}, "LLM endpoints"),
-    h("p", { class: "muted small" }, `OpenAI-compatible /v1 URLs. The first one is the default for new LLM players, the teacher, comments and recaps. Currently from ${st.endpoints_from}.`),
+    h("p", { class: "muted small" }, `OpenAI-compatible /v1 URLs. The first one is the default for new LLM players (and for chat and recaps unless picked below). Currently from ${st.endpoints_from}.`),
     epBox,
     h("label", {}, "API key", key),
     h("div", { class: "row" },
@@ -1563,6 +1596,11 @@ async function renderSettings() {
       } }, "Back to .env") : null,
       st.api_key_set ? h("button", { type: "button", onclick: () => save({ api_key: "" }, epMsg).then(() => renderSettings()) }, "Clear API key") : null,
       epMsg),
+    h("h3", {}, "Which model does what"),
+    h("p", { class: "muted small" }, "Auto: deep analysis uses the quick-chat model, quick chat uses the first endpoint. An LLM player always chats as itself. Save endpoints first if you just added one."),
+    roleBox,
+    h("div", { class: "row" }, h("button", { class: "primary", type: "button", onclick: () =>
+      save({ llm_roles: roles }, roleMsg).then((ok) => ok && renderSettings()) }, "Save models"), roleMsg),
     h("h3", {}, "🔒 Admin PIN"),
     h("p", { class: "muted small" }, "Optional. When set, changing settings needs this PIN - so the kids can't turn the dials."),
     h("div", { class: "row" }, newAdmin,
@@ -1744,8 +1782,8 @@ document.addEventListener("keydown", (e) => {
   for (const side of ["white", "black"]) {  // commentary on but no LLM picked yet: use the default endpoint
     const s = setup[side];
     if (s?.type === "stockfish" && s.commentary && !s.comment_model) {
-      const ep = config.endpoints.find((x) => x.online && x.models?.length) || config.endpoints[0];
-      if (ep) { s.comment_endpoint = ep.name; s.comment_model = ep.models?.[0] || ""; }
+      const c = chatModel();
+      if (c) { s.comment_endpoint = c.endpoint; s.comment_model = c.model; }
     }
   }
   // fill in endpoint/model for stored LLM setups that have none

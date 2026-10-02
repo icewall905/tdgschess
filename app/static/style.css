@@ -543,6 +543,8 @@ label.chk.big { font-size: 14px; font-weight: 800; margin: 0; }
 .st-dials { align-items: start; }
 .st-dial { align-content: start; }
 .st-dial input { height: auto; }
+.st-roles { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr)); gap: 12px 16px; }
+.st-role { display: grid; gap: 4px; align-content: start; }
 /* picture picker */
 .icon-picker { display: grid; gap: 8px; }
 .icon-search { width: 100%; }

@@ -164,13 +164,8 @@ async def llm(endpoint: str, model: str, system: str, user: str, max_tokens: int
 
 
 def pick_llm() -> tuple[str, str]:
-    """The first endpoint that is online (the no-think one is listed first), with its first model."""
-    m = main()
-    for ep in m.ENDPOINTS:
-        mids = [mid for (e, mid) in m.MODEL_KEYS if e == ep]
-        if mids:
-            return ep, mids[0]
-    return next(iter(m.ENDPOINTS), ""), "currentmodel"
+    """The deep-analysis model from the settings (falls back to the quick-chat / default one)."""
+    return main().role_llm("deep")
 
 
 async def build(gid: str, lang: str):
